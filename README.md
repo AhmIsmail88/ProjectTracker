@@ -1,4 +1,4 @@
-![Project Tracker](<img width="1743" height="902" alt="Cover" src="https://github.com/user-attachments/assets/1bb665af-2f0e-4010-b29d-23cc2ec7280a" />)
+![Project Tracker](assets/cover.jpg)
 
 # Project Tracker
 
