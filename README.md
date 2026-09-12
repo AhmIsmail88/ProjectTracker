@@ -1,4 +1,4 @@
-![Project Tracker](assets/cover.jpg)
+![Project Tracker](assets/cover.png)
 
 # Project Tracker
 
