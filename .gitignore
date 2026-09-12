@@ -1,0 +1,25 @@
+# ---- secrets & personal config (NEVER commit) ----
+.env
+config.json
+company_logo.png
+
+# ---- python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# ---- build artifacts ----
+build/
+dist/
+
+# ---- local data & scratch ----
+project_tracker/
+backups/
+attachments/
+notes.md.txt
+
+# ---- OS noise ----
+Thumbs.db
+Desktop.ini
