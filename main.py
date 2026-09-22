@@ -564,6 +564,9 @@ class MainWindow(QMainWindow):
         self.backup_action = file_menu.addAction(tr("menu_backup_now"))
         self.backup_action.triggered.connect(self._backup_now)
 
+        restore_action = file_menu.addAction(tr("menu_restore_backup"))
+        restore_action.triggered.connect(self._restore_backup)
+
         file_menu.addSeparator()
         exit_action = file_menu.addAction(tr("menu_exit"))
         exit_action.triggered.connect(self.close)
@@ -721,13 +724,54 @@ class MainWindow(QMainWindow):
                     QMessageBox.critical(self, "Copy failed", str(exc))
                     return
 
-        self.db = Database(new_db_path, new_attachments_dir)
+        self._switch_to_data_dir(new_dir)
+        QMessageBox.information(self, "Data folder changed", f"Now using:\n{new_dir}")
+
+    def _switch_to_data_dir(self, new_dir):
+        """Points the app at *new_dir* and rebuilds the UI around it."""
+        self.db = Database(config.db_path_for(new_dir), config.attachments_dir_for(new_dir))
         self.data_dir = new_dir
         config.save_data_dir(new_dir)
         self._update_status_bar()
         self._build_central_widget()
         self._apply_theme(self.current_theme)
-        QMessageBox.information(self, "Data folder changed", f"Now using:\n{new_dir}")
+
+    def _restore_backup(self):
+        """Restores a backup into a NEW folder - never over the live data.
+
+        The user is offered the switch afterwards, so a restore can be done
+        defensively (inspect the restored copy first) as well as directly."""
+        backups_dir = backup.backups_dir_for(self.data_dir)
+        source, _ = QFileDialog.getOpenFileName(
+            self, tr("restore_title"), backups_dir if os.path.isdir(backups_dir) else self.data_dir,
+            "Backups (*.db *.zip)"
+        )
+        if not source:
+            return
+
+        stamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
+        target = os.path.join(self.data_dir, f"restored_{stamp}")
+
+        confirm = QMessageBox.question(
+            self, tr("restore_title"),
+            f"{tr('restore_confirm')}\n\n{target}"
+        )
+        if confirm != QMessageBox.Yes:
+            return
+
+        try:
+            backup.restore_backup(source, target)
+        except Exception as exc:  # noqa: BLE001 - surface it, never crash
+            logger.exception("Restore failed")
+            QMessageBox.critical(self, tr("restore_failed"), str(exc))
+            return
+
+        question = QMessageBox.question(self, tr("restore_title"), tr("restore_switch"))
+        if question == QMessageBox.Yes:
+            self._switch_to_data_dir(target)
+            QMessageBox.information(self, tr("restore_title"), f"{tr('restore_done')}\n{target}")
+        else:
+            QMessageBox.information(self, tr("restore_title"), f"{tr('restore_done')}\n{target}")
 
     def _backup_now(self):
         default_name = f"project_tracker_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip"

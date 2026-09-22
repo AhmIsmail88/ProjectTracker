@@ -121,3 +121,40 @@ def last_backup_datetime(data_dir):
     bar."""
     existing = _existing_backups(backups_dir_for(data_dir))
     return existing[-1][0] if existing else None
+
+
+def restore_backup(source_path, target_dir):
+    """Restores a backup into *target_dir*, which must be a folder of its own.
+
+    Never restores over live data: the caller points the app at the restored
+    folder afterwards (or not). Accepts either an automatic .db snapshot or a
+    full .zip backup (database + attachments).
+
+    Returns the path of the restored database. Raises on a corrupt archive or
+    an archive whose entries would escape the target folder.
+    """
+    import zipfile
+
+    if not os.path.isfile(source_path):
+        raise FileNotFoundError(source_path)
+
+    os.makedirs(target_dir, exist_ok=True)
+    target_root = os.path.abspath(target_dir)
+    db_target = os.path.join(target_dir, "project_tracker.db")
+
+    if source_path.lower().endswith(".zip"):
+        with zipfile.ZipFile(source_path) as archive:
+            for member in archive.namelist():
+                destination = os.path.abspath(os.path.join(target_dir, member))
+                # Zip-slip guard: a crafted archive must not be able to write
+                # outside the folder the user chose.
+                if not destination.startswith(target_root + os.sep) and destination != target_root:
+                    raise ValueError(f"Unsafe path in backup: {member!r}")
+            archive.extractall(target_dir)
+        if not os.path.isfile(db_target):
+            raise ValueError("The backup does not contain a database.")
+    else:
+        shutil.copy2(source_path, db_target)
+
+    logger.info("Restored backup %s into %s", source_path, target_dir)
+    return db_target
