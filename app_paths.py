@@ -23,3 +23,13 @@ def get_app_dir():
     if getattr(sys, "frozen", False):
         return os.path.dirname(sys.executable)
     return os.path.dirname(os.path.abspath(__file__))
+
+
+def get_resource_dir():
+    """Folder holding bundled read-only assets (the app icon).
+
+    A --onefile build unpacks its bundled data into sys._MEIPASS at runtime,
+    so bundled assets must be looked up there rather than next to the .exe.
+    Running from source, the project folder itself is the resource folder -
+    the same rule get_app_dir() applies for config.json."""
+    return getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))

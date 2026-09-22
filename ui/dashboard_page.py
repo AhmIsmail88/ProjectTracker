@@ -10,13 +10,14 @@ have sat untouched the longest (possibly forgotten).
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QGridLayout,
     QFrame, QTableWidget, QTableWidgetItem, QAbstractItemView, QHeaderView,
-    QFileDialog, QMessageBox, QTreeWidget, QTreeWidgetItem, QSplitter
+    QFileDialog, QMessageBox, QTreeWidget, QTreeWidgetItem, QSplitter,
+    QProgressBar,
 )
-from PySide6.QtCore import Qt, Signal, QByteArray
+from PySide6.QtCore import Qt, Signal, QByteArray, QTimer
 from PySide6.QtGui import QPainter
 
+from i18n import tr
 from ui.table_utils import configure_interactive_table, ExportWorker, EmptyStateTable
-from ui.pie_chart import PieChartWidget
 from export.excel_export import (
     export_projects_combined_to_excel, export_items_for_cost_update, export_stale_items_to_excel,
 )
@@ -169,6 +170,7 @@ class DashboardPage(QWidget):
         layout = QVBoxLayout(content)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(12)
+        self._content = content
         splitter.addWidget(content)
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
@@ -210,53 +212,148 @@ class DashboardPage(QWidget):
         cards_row.addWidget(self.card_stale, 0, 3)
         layout.addLayout(cards_row)
 
-        # ---- Status breakdown (pie + legend) + value by currency, side by side ----
-        mid_row = QHBoxLayout()
-        mid_row.setSpacing(16)
+        # ---- Bento row: three equal cards side by side. The same widgets as
+        # before, just arranged as a grid instead of one wide status box above
+        # a full-width stale list. ----
+        bento = QGridLayout()
+        bento.setSpacing(12)
+        self.bento = bento
+        self._bento_columns = None
 
-        status_box = QVBoxLayout()
+        status_card = QFrame()
+        self.status_card = status_card
+        status_card.setObjectName("statCard")
+        status_box = QVBoxLayout(status_card)
+        status_box.setContentsMargins(14, 12, 14, 12)
+        status_box.setSpacing(8)
         status_box.addWidget(QLabel("<b>Items by Status</b>"))
-        pie_row = QHBoxLayout()
-        self.pie_chart = PieChartWidget()
-        pie_row.addWidget(self.pie_chart)
-        self.legend_layout = QVBoxLayout()
-        self.legend_layout.setSpacing(4)
-        self.legend_layout.addStretch()
-        pie_row.addLayout(self.legend_layout, 1)
-        status_box.addLayout(pie_row)
-        mid_row.addLayout(status_box, 1)
+        # A horizontal breakdown rather than a pie: this app's data can sit
+        # entirely in one status (everything "Not requested"), and a pie then
+        # draws a meaningless full circle while the bars stay informative and
+        # actually fill the card.
+        self.status_rows_layout = QVBoxLayout()
+        self.status_rows_layout.setSpacing(7)
+        self.status_rows_layout.addStretch()
+        status_box.addLayout(self.status_rows_layout, 1)
+        status_card.setMinimumWidth(260)
+        bento.addWidget(status_card, 0, 0)
 
-        value_box = QVBoxLayout()
+        value_card = QFrame()
+        self.value_card = value_card
+        value_card.setObjectName("statCard")
+        value_box = QVBoxLayout(value_card)
+        value_box.setContentsMargins(14, 12, 14, 12)
+        value_box.setSpacing(8)
         value_box.addWidget(QLabel("<b>Estimated Value by Currency</b>"))
-        self.value_table = QTableWidget()
-        self.value_table.setColumnCount(2)
-        self.value_table.setHorizontalHeaderLabels(["Currency", "Total Value"])
-        self.value_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        self.value_table.verticalHeader().setVisible(False)
-        self.value_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
-        value_box.addWidget(self.value_table)
-        value_box.addStretch()
-        mid_row.addLayout(value_box, 1)
+        # Amounts as large legible rows, not a two-column table: measured,
+        # the table put the currency code at x 35..57 and the amount at
+        # x 374..397 - a ~317px void between them in a 12.5px font, so the
+        # figures read as small and disconnected.
+        self.value_rows_layout = QVBoxLayout()
+        self.value_rows_layout.setSpacing(12)
+        self.value_rows_layout.addStretch()
+        value_box.addLayout(self.value_rows_layout, 1)
+        value_card.setMinimumWidth(240)
+        bento.addWidget(value_card, 0, 1)
 
-        layout.addLayout(mid_row)
-
-        # ---- Stale items ----
-        layout.addWidget(QLabel(
-            "<b>Possibly Forgotten</b> \u2014 still \u201cNot requested\u201d with no activity "
+        stale_card = QFrame()
+        self.stale_card = stale_card
+        stale_card.setObjectName("statCard")
+        stale_box = QVBoxLayout(stale_card)
+        stale_box.setContentsMargins(14, 12, 14, 12)
+        stale_box.setSpacing(8)
+        stale_label = QLabel(
+            "<b>Possibly Forgotten</b><br>still \u201cNot requested\u201d with no activity "
             "for 14+ days. Double-click to open."
-        ))
+        )
+        stale_label.setObjectName("breadcrumb")
+        stale_label.setWordWrap(True)
+        stale_box.addWidget(stale_label)
         self.stale_table = EmptyStateTable("\U0001F389 Nothing forgotten \u2014 every item has had recent activity.")
         self.stale_table.setColumnCount(4)
         self.stale_table.setHorizontalHeaderLabels(["Item Name", "Project", "Area", "Days Untouched"])
+        # "Days Untouched" values are right-aligned - the header should match.
+        self.stale_table.horizontalHeaderItem(3).setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
         self.stale_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.stale_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.stale_table.verticalHeader().setVisible(False)
-        configure_interactive_table(self.stale_table, first_col_width=280)
+        configure_interactive_table(self.stale_table, first_col_width=200)
+        # Every column stays user-draggable (Interactive) - ResizeToContents
+        # both locked the headers AND let a single long project name claim
+        # 688px, squeezing Item Name down to 264px / four wrapped lines.
+        stale_header = self.stale_table.horizontalHeader()
+        stale_header.setStretchLastSection(False)
+        for _col in range(4):
+            stale_header.setSectionResizeMode(_col, QHeaderView.Interactive)
+        self._watch_column_resize(self.stale_table)
         self.stale_table.doubleClicked.connect(self._open_stale_item)
-        layout.addWidget(self.stale_table, 1)
+        stale_card.setMinimumWidth(300)
+        stale_box.addWidget(self.stale_table, 1)
+
+        # Fixed arrangement, chosen for this app's real data: the stale
+        # list can hold thousands of rows, so it gets the full width below
+        # two summary cards. A 3-up row squeezed its 4 columns into ~400px
+        # on a 1913px window and made the list unreadable.
+        self.bento.addWidget(self.status_card, 0, 0)
+        self.bento.addWidget(self.value_card, 0, 1)
+        self.bento.addWidget(self.stale_card, 1, 0, 1, 2)
+        # The status breakdown is the wider card (it carries bars and
+        # labels); "value by currency" usually holds one or two rows, so it
+        # only needs a narrow column. The stale list then spans both.
+        self.bento.setColumnStretch(0, 2)
+        self.bento.setColumnStretch(1, 1)
+        self.bento.setRowStretch(0, 2)
+        self.bento.setRowStretch(1, 3)
+        layout.addLayout(self.bento, 1)
 
         self._stale_items = []
-        self._legend_widgets = []
+        self._status_rows = []
+        self._value_rows = []
+
+    # ------------------------------------------------------------------ #
+    # Column sizing
+    # ------------------------------------------------------------------ #
+    #: Starting widths as fractions of the visible width. Deliberately NOT
+    #: content-driven: one unusually long value would otherwise claim the
+    #: whole column (measured on the user's data: the Project column took
+    #: 688px because of a single long name, leaving Item Name 264px).
+    _STALE_COL_WEIGHTS = (0.46, 0.22, 0.18, 0.14)
+
+    def _watch_column_resize(self, table):
+        """Remembers that the user has sized this table's columns by hand, so
+        automatic fitting stops fighting them."""
+        table._cols_user_resized = False
+        table._cols_fitting = False
+
+        def _on_resized(*_args):
+            if not getattr(table, "_cols_fitting", False):
+                table._cols_user_resized = True
+
+        table.horizontalHeader().sectionResized.connect(_on_resized)
+
+    def _fit_columns(self, table, weights, force=False):
+        """Applies the starting widths, unless the user has already dragged
+        the columns themselves."""
+        if getattr(table, "_cols_user_resized", False) and not force:
+            return
+        width = table.viewport().width()
+        if width <= 0:
+            return
+        total = sum(weights)
+        table._cols_fitting = True
+        try:
+            for col, weight in enumerate(weights):
+                table.setColumnWidth(col, max(90, int(width * weight / total)))
+        finally:
+            table._cols_fitting = False
+
+    def _fit_dashboard_columns(self):
+        self._fit_columns(self.stale_table, self._STALE_COL_WEIGHTS)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        # The viewport width is only final once the layout has settled.
+        QTimer.singleShot(0, self._fit_dashboard_columns)
 
     # ------------------------------------------------------------------ #
     def _set_all_checked(self, checked):
@@ -639,17 +736,9 @@ class DashboardPage(QWidget):
         self.val_stale.setText(str(stale_count))
         self._set_card_severity(self.card_stale, "warn" if stale_count else None)
 
-        self._update_status_pie(summary["status_counts"])
+        self._update_status_breakdown(summary["status_counts"])
 
-        value_by_currency = summary["value_by_currency"]
-        self.value_table.setRowCount(len(value_by_currency))
-        for row, (currency, value) in enumerate(sorted(value_by_currency.items())):
-            label = currency if currency and currency != "?" else "(No currency set)"
-            self.value_table.setItem(row, 0, QTableWidgetItem(label))
-            value_item = QTableWidgetItem(f"{value:,.2f}")
-            value_item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
-            self.value_table.setItem(row, 1, value_item)
-        _fit_table_height(self.value_table, len(value_by_currency))
+        self._update_value_list(summary["value_by_currency"])
 
         self._stale_items = summary["stale_items"]
         self.stale_table.setSortingEnabled(False)  # otherwise a live re-sort mid-loop can scatter
@@ -667,29 +756,95 @@ class DashboardPage(QWidget):
         self.stale_table.setSortingEnabled(True)
         self.stale_table.resizeRowsToContents()
         self.stale_table.viewport().update()
+        self._fit_dashboard_columns()
 
-    def _update_status_pie(self, status_counts):
-        ordered = sorted(status_counts.items(), key=lambda x: -x[1])
-        total = sum(c for _s, c in ordered) or 1
+    def _update_value_list(self, value_by_currency):
+        """One row per currency: the code, then the amount in a large bold
+        figure. Reads clearly with a single row (the usual case here)."""
+        for row_widget in self._value_rows:
+            row_widget.setParent(None)
+        self._value_rows = []
 
-        slices = []
+        if not value_by_currency:
+            empty = QLabel(tr("value_no_data"))
+            empty.setObjectName("breadcrumb")
+            self.value_rows_layout.insertWidget(self.value_rows_layout.count() - 1, empty)
+            self._value_rows.append(empty)
+            return
+
+        for currency, value in sorted(value_by_currency.items(), key=lambda kv: -kv[1]):
+            label = currency if currency and currency != "?" else "(No currency set)"
+
+            wrapper = QWidget()
+            line = QHBoxLayout(wrapper)
+            line.setContentsMargins(0, 0, 0, 0)
+            line.setSpacing(10)
+
+            code = QLabel(label)
+            code.setObjectName("breadcrumb")
+            line.addWidget(code)
+            line.addStretch()
+
+            amount = QLabel(f"{value:,.2f}")
+            amount.setStyleSheet("font-size: 17px; font-weight: 700; background: transparent;")
+            amount.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            line.addWidget(amount)
+
+            self.value_rows_layout.insertWidget(self.value_rows_layout.count() - 1, wrapper)
+            self._value_rows.append(wrapper)
+
+    def _update_status_breakdown(self, status_counts):
+        """One row per status: colour dot, name, a bar proportional to its
+        share, the count and the percentage.
+
+        Deliberately not a pie chart - most projects here sit in a single
+        status, and a one-slice pie says nothing while leaving the card
+        almost empty."""
+        ordered = sorted(status_counts.items(), key=lambda kv: -kv[1])
+        total = sum(count for _status, count in ordered) or 1
+
+        for row_widget in self._status_rows:
+            row_widget.setParent(None)
+        self._status_rows = []
+
         for i, (status, count) in enumerate(ordered):
             color = _STATUS_PIE_COLORS.get(status) or _FALLBACK_COLORS[i % len(_FALLBACK_COLORS)]
-            slices.append((status, count, color))
-        self.pie_chart.set_data(slices)
 
-        for w in self._legend_widgets:
-            w.setParent(None)
-        self._legend_widgets = []
-        for status, count, color in slices:
-            row = QHBoxLayout()
-            row.addWidget(_color_swatch(color))
-            label = QLabel(f"{status} \u2014 {count} ({count * 100 // total}%)")
-            row.addWidget(label, 1)
             wrapper = QWidget()
-            wrapper.setLayout(row)
-            self.legend_layout.insertWidget(self.legend_layout.count() - 1, wrapper)
-            self._legend_widgets.append(wrapper)
+            line = QHBoxLayout(wrapper)
+            line.setContentsMargins(0, 0, 0, 0)
+            line.setSpacing(8)
+
+            line.addWidget(_color_swatch(color))
+
+            # RTL-aware: the label keeps its text and Qt mirrors the row.
+            name = QLabel(status)
+            name.setObjectName("breadcrumb")
+            name.setMinimumWidth(120)
+            line.addWidget(name)
+
+            bar = QProgressBar()
+            bar.setRange(0, total)
+            bar.setValue(count)
+            bar.setTextVisible(False)
+            bar.setFixedHeight(6)
+            line.addWidget(bar, 1)
+
+            count_label = QLabel(f"{count:,}")
+            count_label.setObjectName("breadcrumb")
+            count_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            count_label.setMinimumWidth(56)
+            line.addWidget(count_label)
+
+            pct_label = QLabel(f"{count * 100 // total}%")
+            pct_label.setObjectName("breadcrumb")
+            pct_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            pct_label.setMinimumWidth(42)
+            line.addWidget(pct_label)
+
+            self.status_rows_layout.insertWidget(self.status_rows_layout.count() - 1, wrapper)
+            self._status_rows.append(wrapper)
+
 
     def _set_card_severity(self, card, severity):
         card.setProperty("severity", severity or "")

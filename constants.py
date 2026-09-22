@@ -129,3 +129,128 @@ def remaining_to_request(total_qty, requested_qty):
 
 def remaining_to_deliver(total_qty, delivered_qty):
     return max((total_qty or 0) - (delivered_qty or 0), 0)
+
+
+# --------------------------------------------------------------------------- #
+# Theme state for directly-painted table cells
+# --------------------------------------------------------------------------- #
+# Status chips and the amber "needs attention" cells are painted as cell
+# brushes, not through the stylesheet, so they cannot follow the QSS theme on
+# their own. main.py calls set_theme() whenever the theme changes, and the
+# Items screen re-styles its rows so the chip colors never lag behind the
+# rest of the UI.
+_ACTIVE_THEME = "dark"
+
+
+def set_theme(theme):
+    global _ACTIVE_THEME
+    _ACTIVE_THEME = "light" if theme == "light" else "dark"
+
+
+def get_theme():
+    return _ACTIVE_THEME
+
+
+# Dark-theme equivalents of the pastel status chips: a deep tinted surface
+# with a bright, readable label. Same semantics as the light palette
+# (Delivered stays green, On Hold stays red, and so on).
+_DARK_STATUS_CHIPS = {
+    "Not requested":       ("#1E2A3D", "#A9B8CE"),
+    "Partially Requested": ("#3A2E14", "#F0C46B"),
+    "Requested":           ("#402F10", "#F5CC69"),
+    "PO Issued":           ("#15304F", "#7FB6F5"),
+    "Partially Delivered": ("#3B2A14", "#F0A860"),
+    "Delivered":           ("#123A2C", "#5FD9A6"),
+    "On Hold":             ("#3A1B1F", "#F29494"),
+}
+_DARK_STATUS_FALLBACK = ("#1E2A3D", "#A9B8CE")
+
+_DARK_SPECIAL_CHIPS = {
+    "over_supply":  ("#2E2350", "#C4B0FB"),
+    "no_request":   ("#3A1B1F", "#F29494"),
+    "over_request": ("#3A2716", "#F0A860"),
+}
+
+_LIGHT_WARNING_CHIP = ("#FEF3C7", "#78350F")
+_DARK_WARNING_CHIP = ("#3A2E14", "#F0C46B")
+
+
+def status_chip_colors(status, theme=None):
+    """(background, foreground) for a Status chip.
+
+    On the light theme this returns exactly the original pastel values, so
+    light mode is visually unchanged; on the dark theme it returns the
+    deep-tinted equivalent.
+    """
+    theme = theme or _ACTIVE_THEME
+    if theme == "light":
+        return (STATUS_COLORS.get(status, "#FFFFFF"),
+                STATUS_TEXT_COLORS.get(status, "#1E293B"))
+    return _DARK_STATUS_CHIPS.get(status, _DARK_STATUS_FALLBACK)
+
+
+def special_chip_colors(kind, theme=None):
+    """(background, foreground) for the quantity-warning chips that override
+    the normal status colour: over-supply, delivered-without-request, and
+    over-request."""
+    theme = theme or _ACTIVE_THEME
+    if theme == "light":
+        light = {
+            "over_supply":  (OVER_SUPPLY_COLOR, OVER_SUPPLY_TEXT),
+            "no_request":   (DELIVERED_NO_REQUEST_COLOR, DELIVERED_NO_REQUEST_TEXT),
+            "over_request": (OVER_REQUEST_COLOR, OVER_REQUEST_TEXT),
+        }
+        return light.get(kind, light["over_supply"])
+    return _DARK_SPECIAL_CHIPS.get(kind, _DARK_SPECIAL_CHIPS["over_supply"])
+
+
+def warning_chip_colors(kind, theme=None):
+    """(background, foreground) for the amber "needs attention" cells
+    (missing unit cost / missing PR-PO). Light mode keeps the original amber
+    exactly, so nothing changes there."""
+    theme = theme or _ACTIVE_THEME
+    return _LIGHT_WARNING_CHIP if theme == "light" else _DARK_WARNING_CHIP
+
+
+# --------------------------------------------------------------------------- #
+# Delivery-ratio chips (Projects screen "Delivered %" column)
+# --------------------------------------------------------------------------- #
+# Three bands rather than a continuous scale: a percentage is read as
+# "healthy / in progress / behind", and a discrete band keeps the list
+# scannable instead of a gradient of near-identical colours.
+_LIGHT_RATIO_CHIPS = {
+    "high": ("#D1FAE5", "#065F46"),
+    "mid":  ("#DBEAFE", "#1E40AF"),
+    "low":  ("#FEF3C7", "#92400E"),
+}
+_DARK_RATIO_CHIPS = {
+    "high": ("#123A2C", "#5FD9A6"),
+    "mid":  ("#15304F", "#7FB6F5"),
+    "low":  ("#3A2E14", "#F0C46B"),
+}
+
+
+def ratio_band(percent):
+    """>= 80% delivered is healthy, >= 40% is in progress, below is behind."""
+    if percent >= 80:
+        return "high"
+    if percent >= 40:
+        return "mid"
+    return "low"
+
+
+def ratio_chip_colors(percent, theme=None):
+    """(background, foreground) for a delivery-percentage cell."""
+    theme = theme or _ACTIVE_THEME
+    table = _LIGHT_RATIO_CHIPS if theme == "light" else _DARK_RATIO_CHIPS
+    return table[ratio_band(percent)]
+
+
+def chart_label_color(theme=None):
+    """Foreground colour for text drawn *inside* a chart (the donut total).
+
+    Charts paint with QPainter rather than the stylesheet, so they cannot
+    inherit the theme colour; without this the text would stay the default
+    dark colour and vanish on the dark theme."""
+    theme = theme or _ACTIVE_THEME
+    return "#E8EFF9" if theme == "dark" else "#0E1B30"

@@ -7,19 +7,72 @@ main window into the Tracker (items) screen for that project.
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton,
     QTableWidget, QTableWidgetItem, QAbstractItemView, QMessageBox, QDialog,
-    QListWidget, QListWidgetItem, QStyle, QFileDialog, QProgressBar, QComboBox
+    QListWidget, QListWidgetItem, QStyle, QFileDialog, QProgressBar, QComboBox,
+    QFrame,
 )
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QShortcut, QKeySequence
+from PySide6.QtGui import QColor, QShortcut, QKeySequence
 
 from ui.dialogs import ProjectDialog, ManageGroupsDialog
 from ui.table_utils import configure_interactive_table, ExportWorker, EmptyStateTable
 from ui.activity_widget import ActivityDialog
 from ui.import_excel_dialog import ImportExcelDialog
 from export.excel_export import export_multiple_projects_to_excel
+from constants import ratio_chip_colors
 from i18n import tr
 
-PROJECT_COLUMNS = ["Name", "Group", "Project Number", "Location", "Contractor", "Currency"]
+PROJECT_COLUMNS = ["Name", "Group", "Project Number", "Location", "Contractor", "Currency",
+                   "Delivered %"]
+
+
+class _PercentItem(QTableWidgetItem):
+    """Displays "78%" but sorts by the real number, so clicking the column
+    header ranks projects by completeness instead of alphabetically."""
+
+    def __init__(self, percent, tooltip=""):
+        super().__init__(f"{percent:.0f}%")
+        self._value = float(percent)
+        self.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        if tooltip:
+            self.setToolTip(tooltip)
+
+    def __lt__(self, other):
+        if isinstance(other, _PercentItem):
+            return self._value < other._value
+        return super().__lt__(other)
+
+
+def _compact_amount(value):
+    """1,250,000 -> 1.2M - keeps a KPI card readable instead of spilling a
+    long number across the card."""
+    v = float(value or 0)
+    for limit, suffix in ((1_000_000_000, "B"), (1_000_000, "M"), (1_000, "K")):
+        if abs(v) >= limit:
+            return f"{v / limit:,.1f}{suffix}"
+    return f"{v:,.0f}"
+
+
+def _kpi_card(title, severity=None):
+    """One number + caption. Reuses the same #statCard styling the Dashboard
+    screen uses, so both screens look identical without extra CSS."""
+    card = QFrame()
+    card.setObjectName("statCard")
+    if severity:
+        card.setProperty("severity", severity)
+    box = QVBoxLayout(card)
+    box.setContentsMargins(12, 10, 12, 10)
+    box.setSpacing(2)
+    value_label = QLabel("\u2014")
+    value_label.setObjectName("statValue")
+    title_label = QLabel(title)
+    title_label.setObjectName("breadcrumb")
+    sub_label = QLabel("")
+    sub_label.setObjectName("breadcrumb")
+    box.addWidget(value_label)
+    box.addWidget(title_label)
+    box.addWidget(sub_label)
+    return card, value_label, sub_label
+
 
 
 class TrashDialog(QDialog):
@@ -112,6 +165,22 @@ class ProjectsPage(QWidget):
         header_row.addWidget(trash_btn)
         layout.addLayout(header_row)
 
+        # ---- At-a-glance strip: same aggregate the Dashboard already
+        # computes, so the two screens can never disagree. ----
+        self.stat_cards = {}
+        stats_row = QHBoxLayout()
+        stats_row.setSpacing(10)
+        for key, title_key, severity in [
+            ("projects", "stat_projects", None),
+            ("value", "stat_value", None),
+            ("pending", "stat_pending", "warn"),
+            ("blocked", "stat_blocked", "bad"),
+        ]:
+            card, value_label, sub_label = _kpi_card(tr(title_key), severity)
+            stats_row.addWidget(card, 1)
+            self.stat_cards[key] = (value_label, sub_label)
+        layout.addLayout(stats_row)
+
         filter_row = QHBoxLayout()
         self.search_edit = QLineEdit()
         self.search_edit.setPlaceholderText(tr("search_projects"))
@@ -178,6 +247,12 @@ class ProjectsPage(QWidget):
         self.table.setSortingEnabled(False)
         projects = list(self.db.get_projects())
         self._all_projects = projects
+        # One pass over every project's items, reused for all rows below.
+        try:
+            delivery = self.db.get_project_delivery_stats()
+        except Exception:  # noqa: BLE001 - the list must still render
+            delivery = {}
+        self._delivery_stats = delivery
         self.table.setRowCount(len(projects))
         for row, p in enumerate(projects):
             values = [p["name"], p["group_name"] or "", p["project_number"] or "", p["location"] or "",
@@ -188,7 +263,23 @@ class ProjectsPage(QWidget):
                     cell.setData(Qt.UserRole, p["id"])
                     cell.setData(Qt.UserRole + 1, p["group_id"])
                 self.table.setItem(row, col, cell)
+
+            stats = delivery.get(p["id"]) or {"items": 0, "delivered": 0}
+            total = stats["items"]
+            percent = (100.0 * stats["delivered"] / total) if total else 0.0
+            cell = _PercentItem(percent, tooltip=f"{stats['delivered']} / {total}")
+            bg, fg = ratio_chip_colors(percent)
+            cell.setBackground(QColor(bg))
+            cell.setForeground(QColor(fg))
+            self.table.setItem(row, len(PROJECT_COLUMNS) - 1, cell)
         self.table.setSortingEnabled(True)
+        # Always fall back to alphabetical by project name. Qt otherwise
+        # re-applies whatever sort indicator it still holds (a column the
+        # user clicked earlier, or one restored with the saved layout),
+        # which left the list in an order that looked random.
+        name_col = PROJECT_COLUMNS.index("Name")
+        self.table.sortItems(name_col, Qt.AscendingOrder)
+        self.table.horizontalHeader().setSortIndicator(name_col, Qt.AscendingOrder)
         self.table.resizeRowsToContents()
 
         current_group = self.group_filter.currentData() if self.group_filter.count() else None
@@ -201,7 +292,64 @@ class ProjectsPage(QWidget):
         self.group_filter.setCurrentIndex(max(idx, 0))
         self.group_filter.blockSignals(False)
 
+        self._update_stat_cards()
         self._apply_filter()
+
+    def _update_stat_cards(self):
+        """Fills the KPI strip from the existing cross-project aggregate.
+        A failure here must never break the project list, so it degrades to
+        em-dashes instead."""
+        try:
+            summary = self.db.get_dashboard_summary()
+        except Exception:  # noqa: BLE001 - a KPI strip is never worth a crash
+            return
+        status_counts = summary.get("status_counts", {})
+
+        value_label, value_sub = self.stat_cards["projects"]
+        value_label.setText(f"{summary.get('project_count', 0)}")
+        value_sub.setText(f"{summary.get('item_count', 0)} {tr('stat_items_unit')}")
+
+        value_label, value_sub = self.stat_cards["value"]
+        by_currency = summary.get("value_by_currency", {})
+        if by_currency:
+            top = max(by_currency, key=lambda c: by_currency[c])
+            value_label.setText(_compact_amount(by_currency[top]))
+            value_sub.setText(str(top))
+        else:
+            value_label.setText("\u2014")
+            value_sub.setText("")
+
+        value_label, value_sub = self.stat_cards["pending"]
+        value_label.setText(f"{status_counts.get('Not requested', 0)}")
+        value_sub.setText(tr("stat_pending_sub"))
+
+        value_label, value_sub = self.stat_cards["blocked"]
+        value_label.setText(f"{status_counts.get('On Hold', 0)}")
+        value_sub.setText(tr("stat_blocked_sub"))
+
+    def _recolor_delivery_cells(self):
+        """Re-applies the "Delivered %" band colours from the stats cached by
+        reload(). Those colours are cell brushes, not stylesheet rules, so
+        without this they would keep the previous theme's palette until the
+        list happened to be rebuilt."""
+        stats_by_id = getattr(self, "_delivery_stats", {})
+        last = len(PROJECT_COLUMNS) - 1
+        for row in range(self.table.rowCount()):
+            name_item = self.table.item(row, 0)
+            cell = self.table.item(row, last)
+            if name_item is None or cell is None:
+                continue
+            stats = stats_by_id.get(name_item.data(Qt.UserRole)) or {"items": 0, "delivered": 0}
+            total = stats["items"]
+            percent = (100.0 * stats["delivered"] / total) if total else 0.0
+            bg, fg = ratio_chip_colors(percent)
+            cell.setBackground(QColor(bg))
+            cell.setForeground(QColor(fg))
+
+    def on_theme_changed(self):
+        """Called by the main window after a theme switch."""
+        self._update_stat_cards()
+        self._recolor_delivery_cells()
 
     def _apply_filter(self):
         text = self.search_edit.text().strip().lower()
@@ -349,6 +497,28 @@ class ProjectsPage(QWidget):
                 self.table.scrollToItem(self.table.item(row, 0))
                 self.table.setFocus()
                 break
+
+    def _row_for_project_id(self, project_id):
+        """The on-screen row currently holding this project id."""
+        for row in range(self.table.rowCount()):
+            cell = self.table.item(row, 0)
+            if cell is not None and cell.data(Qt.UserRole) == project_id:
+                return row
+        return None
+
+    def select_project(self, project_id):
+        """Selects and scrolls to a project, so coming back from the items
+        screen lands on the project the user was working in.
+
+        If a search filter is hiding that project it is cleared first -
+        otherwise the selection would be invisible."""
+        row = self._row_for_project_id(project_id)
+        if row is None:
+            return False
+        if self.table.isRowHidden(row) and self.search_edit.text().strip():
+            self.search_edit.clear()   # triggers _apply_filter
+        self._select_row_by_id(project_id)
+        return True
 
     def _open_selected_project(self):
         pid = self._selected_project_id()

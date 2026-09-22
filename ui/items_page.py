@@ -16,7 +16,8 @@ from PySide6.QtCore import Qt, Signal, QThread, QItemSelectionModel
 from constants import STATUS_OPTIONS, STATUS_COLORS, STATUS_TEXT_COLORS, is_over_supplied, \
     OVER_SUPPLY_COLOR, OVER_SUPPLY_TEXT, remaining_to_request, remaining_to_deliver, \
     is_delivered_without_request, DELIVERED_NO_REQUEST_COLOR, DELIVERED_NO_REQUEST_TEXT, \
-    is_over_requested, OVER_REQUEST_COLOR, OVER_REQUEST_TEXT
+    is_over_requested, OVER_REQUEST_COLOR, OVER_REQUEST_TEXT, \
+    status_chip_colors, special_chip_colors, warning_chip_colors
 from ui.dialogs import ItemDialog, AttachmentsDialog
 from ui.bulk_edit_dialog import BulkEditDialog
 from ui.find_replace_dialog import FindReplaceDialog
@@ -145,20 +146,24 @@ class TrackerPage(QWidget):
         outer = QVBoxLayout(self)
         outer.setContentsMargins(14, 10, 14, 10)
 
-        # ---- Header: back button + title + breadcrumb, all in one row ----
-        header_row = QHBoxLayout()
-        back_btn = QPushButton(tr("back_to_projects"))
-        back_btn.clicked.connect(self.back_requested.emit)
-        header_row.addWidget(back_btn)
+        # ---- Header: breadcrumb line, then title + subtitle + back ----
+        self.breadcrumb_label = QLabel()
+        self.breadcrumb_label.setObjectName("breadcrumb")
+        outer.addWidget(self.breadcrumb_label)
 
+        header_row = QHBoxLayout()
         self.title_label = QLabel()
         self.title_label.setObjectName("pageTitle")
         header_row.addWidget(self.title_label)
 
-        self.breadcrumb_label = QLabel()
-        self.breadcrumb_label.setObjectName("breadcrumb")
-        header_row.addWidget(self.breadcrumb_label)
+        self.subtitle_label = QLabel()
+        self.subtitle_label.setObjectName("breadcrumb")
+        header_row.addWidget(self.subtitle_label)
         header_row.addStretch()
+
+        back_btn = QPushButton(tr("back_to_projects"))
+        back_btn.clicked.connect(self.back_requested.emit)
+        header_row.addWidget(back_btn)
         outer.addLayout(header_row)
 
         self.tabs = QTabWidget()
@@ -183,14 +188,39 @@ class TrackerPage(QWidget):
     def open_project(self, project_id, select_item_id=None):
         self.project = self.db.get_project(project_id)
         self.title_label.setText(self.project["name"])
+        self.breadcrumb_label.setText(f"{tr('projects')}  \u203a  {self.project['name']}")
         bits = [b for b in [self.project["project_number"], self.project["location"], self.project["contractor"]] if b]
-        self.breadcrumb_label.setText(("  \u2022  " + "  |  ".join(bits)) if bits else "")
+        self.subtitle_label.setText("  \u2022  ".join(bits))
         if select_item_id is not None:
             self.tabs.setCurrentIndex(0)  # make sure the Items tab is what's shown
             self._clear_filters()  # a stale filter from a previous project could hide the target item
         self.reload_items(select_item_id=select_item_id)
         if self.tabs.currentIndex() == 2:
             self.activity_view.load(project_id=self.project["id"])
+
+    # ------------------------------------------------------------------ #
+    # External entry points (command palette / theme changes)
+    # ------------------------------------------------------------------ #
+    def add_item_from_palette(self):
+        """Public entry point used by the Ctrl+K command palette."""
+        self._add_item()
+
+    def export_pdf_from_palette(self):
+        """Public entry point used by the Ctrl+K command palette."""
+        self._export_pdf()
+
+    def on_theme_changed(self):
+        """Re-applies the directly-painted cell colors (status chips and the
+        amber warning highlights) after a theme switch. Those are cell
+        brushes rather than stylesheet rules, so without this the table would
+        keep the previous theme's chip colors until it happened to be
+        rebuilt. Scroll position and selection are preserved."""
+        if self.project is None:
+            return
+        selected = self._selected_item_ids()
+        scroll = self.items_table.verticalScrollBar().value()
+        self.reload_items(select_item_ids=selected or None)
+        self.items_table.verticalScrollBar().setValue(scroll)
 
     def _on_tab_changed(self, index):
         if index == 2 and self.project is not None:
@@ -479,7 +509,9 @@ class TrackerPage(QWidget):
     def _style_status_cell(cell, it):
         """Applies the computed warning/color treatment to a Status cell.
         Single styling path shared by full table population and targeted
-        in-place row refreshes, so the two can never drift apart."""
+        in-place row refreshes, so the two can never drift apart. Colors are
+        theme-aware: the light theme keeps the original pastel chips, the
+        dark theme uses the deep-tinted equivalents."""
         total = it["total_quantity"] or 0
         requested = it["requested_quantity"] or 0
         delivered = it["delivered_quantity"] or 0
@@ -488,28 +520,29 @@ class TrackerPage(QWidget):
         over_requested = is_over_requested(total, requested)
         tooltip_parts = []
         if over:
-            bg, fg = OVER_SUPPLY_COLOR, OVER_SUPPLY_TEXT
+            bg, fg = special_chip_colors("over_supply")
             cell.setText(f"{it['status']} \u26A0")
             tooltip_parts.append("Delivered quantity exceeds Total quantity.")
         elif delivered_no_request:
-            bg, fg = DELIVERED_NO_REQUEST_COLOR, DELIVERED_NO_REQUEST_TEXT
+            bg, fg = special_chip_colors("no_request")
             cell.setText(f"{it['status']} \u26A0")
             tooltip_parts.append(
                 "Delivered quantity is recorded but nothing was ever requested for this item."
             )
         elif over_requested:
-            bg, fg = OVER_REQUEST_COLOR, OVER_REQUEST_TEXT
+            bg, fg = special_chip_colors("over_request")
             cell.setText(f"{it['status']} \u26A0")
             tooltip_parts.append("Requested quantity exceeds Total quantity.")
         else:
-            bg = STATUS_COLORS.get(it["status"], "#FFFFFF")
-            fg = STATUS_TEXT_COLORS.get(it["status"], "#1E293B")
+            bg, fg = status_chip_colors(it["status"])
         cell.setBackground(QColor(bg))
         cell.setForeground(QColor(fg))
         if it["variance_note"]:
             tooltip_parts.append(it["variance_note"])
         if tooltip_parts:
             cell.setToolTip("\n".join(tooltip_parts))
+
+
 
     def _row_for_item_id(self, item_id):
         """The on-screen row currently holding this item id (stable under
@@ -561,8 +594,9 @@ class TrackerPage(QWidget):
 
             unit_cost_cell = self.items_table.item(row, COL_UNIT_COST)
             if not (it["unit_cost"] or 0):
-                unit_cost_cell.setBackground(QColor(MISSING_COST_COLOR))
-                unit_cost_cell.setForeground(QColor(MISSING_COST_TEXT))
+                _warn_bg, _warn_fg = warning_chip_colors("missing_cost")
+                unit_cost_cell.setBackground(QColor(_warn_bg))
+                unit_cost_cell.setForeground(QColor(_warn_fg))
                 unit_cost_cell.setToolTip(
                     "No unit cost entered yet \u2014 double-click or press F2 to fill it in"
                 )
@@ -637,13 +671,15 @@ class TrackerPage(QWidget):
                     self._style_status_cell(cell, it)
 
                 if col == COL_UNIT_COST and not (it["unit_cost"] or 0):
-                    cell.setBackground(QColor(MISSING_COST_COLOR))
-                    cell.setForeground(QColor(MISSING_COST_TEXT))
+                    _warn_bg, _warn_fg = warning_chip_colors("missing_cost")
+                    cell.setBackground(QColor(_warn_bg))
+                    cell.setForeground(QColor(_warn_fg))
                     cell.setToolTip("No unit cost entered yet \u2014 double-click or press F2 to fill it in")
 
                 if col == COL_PRPO and not (has_pr and has_po):
-                    cell.setBackground(QColor(MISSING_PRPO_COLOR))
-                    cell.setForeground(QColor(MISSING_PRPO_TEXT))
+                    _warn_bg, _warn_fg = warning_chip_colors("missing_prpo")
+                    cell.setBackground(QColor(_warn_bg))
+                    cell.setForeground(QColor(_warn_fg))
                     cell.setToolTip("Open Attachments to add the missing PR/PO document")
 
                 self.items_table.setItem(row, col, cell)

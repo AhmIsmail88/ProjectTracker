@@ -5,7 +5,9 @@ a = Analysis(
     ['main.py'],
     pathex=[],
     binaries=[],
-    datas=[],
+    # The window/taskbar icon is loaded at runtime, so it must be bundled
+    # as data; the same file is also stamped onto the .exe below.
+    datas=[('assets/app.ico', 'assets')],
     # Arabic PDF support (imported lazily inside export/pdf_export.py):
     # pin them so PyInstaller always bundles them into the exe.
     hiddenimports=['arabic_reshaper', 'bidi', 'bidi.algorithm'],
@@ -25,6 +27,7 @@ exe = EXE(
     a.datas,
     [],
     name='ProjectTracker',
+    icon=['assets/app.ico'],
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

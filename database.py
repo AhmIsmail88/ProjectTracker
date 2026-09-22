@@ -1128,3 +1128,18 @@ class Database:
             "missing_cost_count": missing_cost_count,
             "stale_items": stale_items,
         }
+
+    def get_project_delivery_stats(self):
+        """{project_id: {"items": n, "delivered": n}} in one pass — backs the
+        "Delivered %" column on the Projects screen.
+
+        An item counts as delivered when its stored status is "Delivered",
+        which is exactly the rule compute_status() applies, so this column
+        can never disagree with the Dashboard's status breakdown."""
+        stats = {}
+        for project in self.get_projects():
+            items = self.get_items(project["id"])
+            delivered = sum(1 for it in items if it["status"] == "Delivered")
+            stats[project["id"]] = {"items": len(items), "delivered": delivered}
+        return stats
+

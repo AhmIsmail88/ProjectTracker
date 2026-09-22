@@ -10,6 +10,8 @@ from PySide6.QtWidgets import QWidget
 from PySide6.QtGui import QPainter, QColor, QPen
 from PySide6.QtCore import Qt, QRectF
 
+from constants import chart_label_color
+
 
 class PieChartWidget(QWidget):
     def __init__(self, parent=None):
@@ -34,14 +36,29 @@ class PieChartWidget(QWidget):
 
         total = sum(v for _l, v, _c in self._slices)
         if total <= 0:
-            painter.setPen(self.palette().color(self.foregroundRole()).lighter(160))
+            painter.setPen(QColor(chart_label_color()))
             painter.drawText(self.rect(), Qt.AlignCenter, "No data")
             return
 
-        painter.setPen(QPen(QColor("#00000000")))
+        # Drawn as a ring (thick stroked arc) with the total in the middle:
+        # a single-status breakdown - the common case in this app, where
+        # everything can still be "Not requested" - then reads as "100% of
+        # N" instead of a blank disc.
+        thickness = max(8.0, side * 0.22)
+        ring = rect.adjusted(thickness / 2, thickness / 2, -thickness / 2, -thickness / 2)
         start_angle = 90 * 16  # 12 o'clock, Qt angles in 1/16th degrees
         for _label, value, color in self._slices:
             span = round(value / total * 360 * 16)
-            painter.setBrush(QColor(color))
-            painter.drawPie(rect, start_angle, -span)  # clockwise
+            pen = QPen(QColor(color), thickness)
+            pen.setCapStyle(Qt.FlatCap)
+            painter.setPen(pen)
+            painter.setBrush(Qt.NoBrush)
+            painter.drawArc(ring, start_angle, -span)  # clockwise
             start_angle -= span
+
+        font = painter.font()
+        font.setPointSizeF(max(9.0, side * 0.11))
+        font.setBold(True)
+        painter.setFont(font)
+        painter.setPen(QColor(chart_label_color()))
+        painter.drawText(self.rect(), Qt.AlignCenter, f"{total:,}")

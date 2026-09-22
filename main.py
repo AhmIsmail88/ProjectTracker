@@ -19,17 +19,23 @@ from datetime import datetime
 
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QPushButton, QLabel, QMessageBox, QFileDialog, QStackedWidget
+    QPushButton, QLabel, QMessageBox, QFileDialog, QStackedWidget, QFrame
 )
-from PySide6.QtCore import Qt, QSettings
-from PySide6.QtGui import QShortcut, QKeySequence
+from PySide6.QtCore import Qt, QSettings, QSize
+from PySide6.QtGui import QIcon, QShortcut, QKeySequence
 
 import config
-from app_paths import get_app_dir
+from app_paths import get_app_dir, get_resource_dir
 from constants import APP_VERSION
 from database import Database
 import backup
-from ui.styles import DARK_THEME, LIGHT_THEME
+from ui.styles import get_stylesheet, DARK_TOKENS, LIGHT_TOKENS
+from ui.icons import make_icon
+from ui.command_palette import (
+    CommandPalette, ACTION_ADD_ITEM, ACTION_EXPORT_PDF, ACTION_SEARCH_ALL,
+    ACTION_TOGGLE_THEME, ACTION_TOGGLE_LANGUAGE,
+)
+import constants
 from ui.widgets import UndoBar
 from ui.table_utils import ExportWorker
 from ui.projects_page import ProjectsPage
@@ -49,6 +55,41 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+
+
+#: Stable identity Windows uses to group this app's taskbar button. Without
+#: an explicit one, a packaged app can inherit a generic identity and keep
+#: showing a cached placeholder icon in the taskbar.
+APP_USER_MODEL_ID = "ProjectTracker.DesktopApp"
+
+
+def _set_windows_app_id():
+    """Tell Windows which app this is, so the taskbar uses OUR icon.
+
+    Windows-only and best-effort: any failure is logged and ignored, because
+    a taskbar identity is never worth failing startup over."""
+    if not sys.platform.startswith("win"):
+        return
+    try:
+        import ctypes
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(APP_USER_MODEL_ID)
+    except Exception:  # noqa: BLE001 - cosmetic only
+        logger.warning("Could not set the Windows app id", exc_info=True)
+
+
+def _app_icon():
+    """The window / taskbar icon bundled with the app.
+
+    Returns an empty QIcon when the asset is missing, so a missing icon can
+    never stop the app from starting."""
+    for name in ("app.ico", "app.png"):
+        path = os.path.join(get_resource_dir(), "assets", name)
+        if os.path.isfile(path):
+            return QIcon(path)
+    logger.warning("App icon not found next to %s", get_resource_dir())
+    return QIcon()
+
+
 class MainWindow(QMainWindow):
     def __init__(self, db, data_dir):
         super().__init__()
@@ -57,6 +98,9 @@ class MainWindow(QMainWindow):
         self._settings = QSettings("ProjectTracker", "MainWindow")
 
         self.current_theme = self._settings.value("theme", "dark")
+        # Collapsed by default: a hamburger menu that the user can open,
+        # and the choice sticks for next time.
+        self._sidebar_collapsed = self._settings.value("sidebar_collapsed", True, type=bool)
         i18n.set_language(self._settings.value("language", "ar"))
         QApplication.instance().setLayoutDirection(
             Qt.RightToLeft if i18n.get_language() == "ar" else Qt.LeftToRight
@@ -65,6 +109,11 @@ class MainWindow(QMainWindow):
         self.resize(1360, 800)
         self.setMinimumSize(1024, 620)
         self._build_central_widget()
+        # Created once, on the window itself: rebuilding the central widget
+        # on a language change must not register these shortcuts twice.
+        QShortcut(QKeySequence("Ctrl+K"), self, self._open_command_palette)
+        QShortcut(QKeySequence("Ctrl+Shift+F"), self, self._open_global_search)
+        QShortcut(QKeySequence("Ctrl+B"), self, self._toggle_sidebar)
         self._apply_theme(self.current_theme)
         self._restore_window_state()
         self._reopen_last_project()
@@ -86,8 +135,6 @@ class MainWindow(QMainWindow):
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
         self.setCentralWidget(central)
-
-        self._build_top_bar(root)
 
         body = QHBoxLayout()
         body.setContentsMargins(0, 0, 0, 0)
@@ -112,6 +159,10 @@ class MainWindow(QMainWindow):
         self.stack.addWidget(self.suppliers_page)   # 2
         self.stack.addWidget(self.ai_page)           # 3
         self.stack.addWidget(self.dashboard_page)    # 4
+        # Sidebar is added FIRST so Qt puts it on the leading edge in both
+        # directions: right under Arabic (RTL), left under English (LTR).
+        self.sidebar = self._build_sidebar()
+        body.addWidget(self.sidebar)
         body.addWidget(self.stack, 1)
 
         root.addWidget(self.undo_bar)
@@ -121,55 +172,158 @@ class MainWindow(QMainWindow):
         self._build_menu_bar()
         self._update_status_bar()
 
-    def _build_top_bar(self, root):
-        """A single compact horizontal bar replaces the old tall, mostly
-        empty sidebar: page navigation on the left, theme/language on the
-        right — all in one row instead of a whole side column."""
-        bar = QWidget()
-        bar.setObjectName("toolbarFrame")
-        layout = QHBoxLayout(bar)
-        layout.setContentsMargins(12, 6, 12, 6)
-        layout.setSpacing(6)
+    def _build_sidebar(self):
+        """Collapsible navigation rail.
 
-        # Company logo (user branding) - hidden when none is set.
+        Expanded it shows the logo, the labelled page navigation and the
+        global tools. Collapsed - the hamburger - it shrinks to an icon-only
+        strip so the content area gets the width back. The state is
+        remembered between runs."""
+        side = QWidget()
+        side.setObjectName("sidebar")
+        self.sidebar = side
+
+        layout = QVBoxLayout(side)
+        layout.setContentsMargins(12, 14, 12, 14)
+        layout.setSpacing(2)
+        self._sidebar_layout = layout
+        self._sidebar_labels = []
+
+        header = QHBoxLayout()
+        header.setContentsMargins(0, 0, 0, 0)
+        header.setSpacing(8)
+
+        self.hamburger_btn = QPushButton()
+        self.hamburger_btn.setObjectName("hamburgerButton")
+        self.hamburger_btn.setCursor(Qt.PointingHandCursor)
+        self.hamburger_btn.setIconSize(QSize(18, 18))
+        self.hamburger_btn.setProperty("iconName", "menu")
+        self.hamburger_btn.clicked.connect(self._toggle_sidebar)
+        header.addWidget(self.hamburger_btn)
+
         self.logo_label = QLabel()
         self.logo_label.setObjectName("logoLabel")
         self._apply_logo()
-        layout.addWidget(self.logo_label)
+        header.addWidget(self.logo_label)
+        header.addStretch()
+        layout.addLayout(header)
+        layout.addSpacing(6)
 
         self.nav_buttons = {}
-        for key, page_index, label_key in [
-            ("projects", 0, "projects"),
-            ("suppliers", 2, "suppliers"),
-            ("ai", 3, "ai_assistant"),
-            ("dashboard", 4, "dashboard"),
+        self._add_sidebar_label(tr("side_section_nav"))
+        for key, page_index, label_key, icon_name in [
+            ("projects", 0, "projects", "grid"),
+            ("suppliers", 2, "suppliers", "users"),
+            ("ai", 3, "ai_assistant", "spark"),
+            ("dashboard", 4, "dashboard", "chart"),
         ]:
             btn = QPushButton(tr(label_key))
-            btn.setObjectName("navButton")
-            btn.setCheckable(True)
+            self._prepare_nav_button(btn, icon_name, checkable=True)
             btn.clicked.connect(lambda _checked, idx=page_index, k=key: self._navigate(idx, k))
             layout.addWidget(btn)
             self.nav_buttons[key] = btn
 
-        search_btn = QPushButton("\U0001F50D Search All Projects")
-        search_btn.setToolTip("Find an item by name across every project (Ctrl+Shift+F)")
-        search_btn.clicked.connect(self._open_global_search)
-        layout.addWidget(search_btn)
-        QShortcut(QKeySequence("Ctrl+Shift+F"), self, self._open_global_search)
+        self._add_sidebar_label(tr("side_section_open"))
+        items_btn = QPushButton(tr("items_tracker"))
+        self._prepare_nav_button(items_btn, "list", checkable=True, tooltip=tr("palette_hint"))
+        items_btn.clicked.connect(lambda: self._navigate(1, "items"))
+        layout.addWidget(items_btn)
+        self.nav_buttons["items"] = items_btn
 
         layout.addStretch()
 
-        self.theme_btn = QPushButton(tr("light_mode") if self.current_theme == "dark" else tr("dark_mode"))
-        self.theme_btn.setToolTip("Switch between Dark and Light mode")
+        self._add_sidebar_label(tr("side_section_tools"))
+
+        self.search_btn = QPushButton(tr("search_all_projects"))
+        self._prepare_nav_button(self.search_btn, "search", tooltip=tr("search_all_projects_tip"))
+        self.search_btn.clicked.connect(self._open_global_search)
+        layout.addWidget(self.search_btn)
+
+        self.palette_btn = QPushButton(tr("command_palette"))
+        self._prepare_nav_button(self.palette_btn, "command", tooltip=tr("palette_hint"))
+        self.palette_btn.clicked.connect(self._open_command_palette)
+        layout.addWidget(self.palette_btn)
+
+        self.theme_btn = QPushButton(
+            tr("light_mode") if self.current_theme == "dark" else tr("dark_mode"))
+        self._prepare_nav_button(self.theme_btn, "theme")
         self.theme_btn.clicked.connect(self._toggle_theme)
         layout.addWidget(self.theme_btn)
 
         self.lang_btn = QPushButton(tr("language"))
-        self.lang_btn.setToolTip("Switch interface language")
+        self._prepare_nav_button(self.lang_btn, "lang")
         self.lang_btn.clicked.connect(self._toggle_language)
         layout.addWidget(self.lang_btn)
 
-        root.addWidget(bar)
+        self._apply_sidebar_state()
+        return side
+
+    def _add_sidebar_label(self, text):
+        label = self._section_label(text)
+        self._sidebar_layout.addWidget(label)
+        self._sidebar_labels.append(label)
+        return label
+
+    # ------------------------------------------------------------------ #
+    # Collapse / expand
+    # ------------------------------------------------------------------ #
+    def _toggle_sidebar(self):
+        self._sidebar_collapsed = not getattr(self, "_sidebar_collapsed", False)
+        self._settings.setValue("sidebar_collapsed", self._sidebar_collapsed)
+        self._apply_sidebar_state()
+
+    def _sidebar_text(self, btn):
+        """The label a sidebar button shows when the rail is expanded."""
+        return btn.property("fullText") or btn.text()
+
+    def _set_sidebar_button_text(self, btn, text):
+        btn.setProperty("fullText", text)
+        collapsed = getattr(self, "_sidebar_collapsed", False)
+        btn.setText("" if collapsed else text)
+        if collapsed:
+            btn.setToolTip(text)
+
+    def _apply_sidebar_state(self):
+        """Collapsed = icon-only rail. Buttons keep their labels in a
+        property, so nothing has to be rebuilt to switch states."""
+        collapsed = getattr(self, "_sidebar_collapsed", False)
+        side = getattr(self, "sidebar", None)
+        if side is None:
+            return
+        side.setFixedWidth(64 if collapsed else 230)
+        layout = getattr(self, "_sidebar_layout", None)
+        if layout is not None:
+            layout.setContentsMargins(8 if collapsed else 12, 14, 8 if collapsed else 12, 14)
+
+        for label in getattr(self, "_sidebar_labels", []):
+            label.setVisible(not collapsed)
+        if hasattr(self, "logo_label"):
+            self.logo_label.setVisible(not collapsed and config.logo_path() is not None)
+        if hasattr(self, "hamburger_btn"):
+            self.hamburger_btn.setToolTip(tr("menu_toggle_tip"))
+
+        buttons = list(getattr(self, "nav_buttons", {}).values())
+        for attr in ("search_btn", "palette_btn", "theme_btn", "lang_btn"):
+            btn = getattr(self, attr, None)
+            if btn is not None:
+                buttons.append(btn)
+        for btn in buttons:
+            text = self._sidebar_text(btn)
+            btn.setText("" if collapsed else text)
+            if collapsed:
+                btn.setToolTip(text)
+            else:
+                btn.setToolTip(btn.property("baseTip") or "")
+
+        self._refresh_sidebar_icons()
+
+    @staticmethod
+    def _section_label(text):
+        label = QLabel(text)
+        label.setObjectName("sideSection")
+        return label
+
+
 
     def _pad_undo_bar(self):
         # Give the floating undo bar a little breathing room from the edges.
@@ -186,6 +340,11 @@ class MainWindow(QMainWindow):
             self.ai_page.refresh_projects()
         elif key == "projects":
             self.projects_page.reload()
+            # Keep the user oriented: coming back from the items screen should
+            # land on the project they were just working in.
+            open_project = getattr(self.tracker_page, "project", None)
+            if open_project:
+                self.projects_page.select_project(open_project["id"])
         elif key == "dashboard":
             self.dashboard_page.reload()
 
@@ -194,6 +353,7 @@ class MainWindow(QMainWindow):
         self.stack.setCurrentIndex(1)
         for btn in self.nav_buttons.values():
             btn.setChecked(False)
+        self.nav_buttons["items"].setChecked(True)
         config.save_last_project_id(project_id)
 
     def _open_project_and_item(self, project_id, item_id):
@@ -204,12 +364,77 @@ class MainWindow(QMainWindow):
         self.stack.setCurrentIndex(1)
         for btn in self.nav_buttons.values():
             btn.setChecked(False)
+        self.nav_buttons["items"].setChecked(True)
         config.save_last_project_id(project_id)
 
     def _open_global_search(self):
         dlg = GlobalSearchDialog(self, self.db)
         dlg.result_chosen.connect(self._open_project_and_item)
         dlg.exec()
+
+    # ------------------------------------------------------------------ #
+    # Sidebar icons
+    # ------------------------------------------------------------------ #
+    def _prepare_nav_button(self, btn, icon_name, checkable=False, tooltip=""):
+        """Wires a sidebar button to a drawn icon that re-colours itself for
+        the active theme and for the checked state, and remembers its label so
+        the rail can collapse to icons only without losing anything."""
+        btn.setObjectName("navButton")
+        btn.setProperty("iconName", icon_name)
+        btn.setProperty("fullText", btn.text())
+        btn.setProperty("baseTip", tooltip)
+        btn.setIconSize(QSize(16, 16))
+        btn.setCursor(Qt.PointingHandCursor)
+        if checkable:
+            btn.setCheckable(True)
+            btn.toggled.connect(lambda _checked, b=btn: self._apply_button_icon(b))
+
+    def _icon_colors(self):
+        tokens = DARK_TOKENS if self.current_theme == "dark" else LIGHT_TOKENS
+        return tokens["muted"], tokens["accent"]
+
+    def _apply_button_icon(self, btn):
+        name = btn.property("iconName")
+        if not name:
+            return
+        muted, accent = self._icon_colors()
+        active = btn.isCheckable() and btn.isChecked()
+        btn.setIcon(make_icon(name, accent if active else muted))
+
+    def _refresh_sidebar_icons(self):
+        """Icons are pixmaps, not stylesheet rules, so they are regenerated
+        whenever the theme changes and for every state change."""
+        for btn in list(getattr(self, "nav_buttons", {}).values()):
+            self._apply_button_icon(btn)
+        # The hamburger lives in the same rail, so it needs its icon drawn
+        # too - without this it was an invisible (but working) button.
+        for attr in ("hamburger_btn", "search_btn", "palette_btn", "theme_btn", "lang_btn"):
+            btn = getattr(self, attr, None)
+            if btn is not None:
+                self._apply_button_icon(btn)
+
+    def _open_command_palette(self):
+        """Ctrl+K: one box for projects, items and common actions."""
+        palette = CommandPalette(self, self.db)
+        palette.set_context(getattr(self.tracker_page, "project", None) is not None)
+        palette.item_chosen.connect(self._open_project_and_item)
+        palette.project_chosen.connect(self._open_project)
+        palette.action_requested.connect(self._run_palette_action)
+        # Kept alive for the lifetime of the popup.
+        self._palette = palette
+        palette.open_palette()
+
+    def _run_palette_action(self, action_id):
+        if action_id == ACTION_ADD_ITEM:
+            self.tracker_page.add_item_from_palette()
+        elif action_id == ACTION_EXPORT_PDF:
+            self.tracker_page.export_pdf_from_palette()
+        elif action_id == ACTION_SEARCH_ALL:
+            self._open_global_search()
+        elif action_id == ACTION_TOGGLE_THEME:
+            self._toggle_theme()
+        elif action_id == ACTION_TOGGLE_LANGUAGE:
+            self._toggle_language()
 
     # ---------------------------------------------------------------
     # Theme / language
@@ -221,12 +446,25 @@ class MainWindow(QMainWindow):
     def _apply_theme(self, theme):
         self.current_theme = theme
         self._settings.setValue("theme", theme)
-        if theme == "dark":
-            QApplication.instance().setStyleSheet(DARK_THEME)
-            self.theme_btn.setText(tr("light_mode"))
-        else:
-            QApplication.instance().setStyleSheet(LIGHT_THEME)
-            self.theme_btn.setText(tr("dark_mode"))
+        # Table chips are painted as cell brushes rather than through the
+        # stylesheet, so the theme has to be published where they are built.
+        constants.set_theme(theme)
+        rtl = i18n.get_language() == "ar"
+        QApplication.instance().setStyleSheet(get_stylesheet(theme, rtl=rtl))
+        if hasattr(self, "theme_btn"):
+            self._set_sidebar_button_text(
+                self.theme_btn, tr("light_mode") if theme == "dark" else tr("dark_mode"))
+        # ...and the already-open Items screen re-styles its rows now, so the
+        # chips never lag behind the rest of the UI after a theme switch.
+        tracker = getattr(self, "tracker_page", None)
+        if tracker is not None:
+            tracker.on_theme_changed()
+        projects = getattr(self, "projects_page", None)
+        if projects is not None:
+            projects.on_theme_changed()
+        self._refresh_sidebar_icons()
+
+
 
     def _toggle_language(self):
         new_lang = "en" if i18n.get_language() == "ar" else "ar"
@@ -472,6 +710,8 @@ def main():
         sys.path.insert(0, app_dir)
 
     app = QApplication(sys.argv)
+    _set_windows_app_id()
+    app.setWindowIcon(_app_icon())
 
     data_dir = config.load_data_dir()
     if not data_dir:
