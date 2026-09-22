@@ -573,6 +573,29 @@ class Database:
         return rows
 
 
+    def get_cost_changes(self, project_ids=None, limit=2000):
+        """Every recorded unit-cost change, newest first - the data behind the
+        cost-change log report.
+
+        Returns rows of: item_name, project_name, project_id, old_value,
+        new_value, changed_at."""
+        query = (
+            "SELECT a.entity_name AS item_name, a.project_id, p.name AS project_name, "
+            "a.old_value, a.new_value, a.changed_at "
+            "FROM audit_log a LEFT JOIN projects p ON p.id = a.project_id "
+            "WHERE a.entity_type = 'item' AND a.field = 'unit_cost'"
+        )
+        params = []
+        if project_ids is not None:
+            placeholders = ", ".join("?" for _ in project_ids)
+            query += f" AND a.project_id IN ({placeholders})"
+            params += list(project_ids)
+        query += " ORDER BY a.changed_at DESC, a.id DESC LIMIT ?"
+        params.append(limit)
+        with self._connect() as conn:
+            return conn.execute(query, params).fetchall()
+
+
     # ---------------- Suppliers ----------------
     def add_supplier(self, name, contact_person="", phone="", email="", notes=""):
         with self._connect() as conn:
