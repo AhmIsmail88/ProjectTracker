@@ -44,6 +44,7 @@ from ui.suppliers_page import SuppliersPage
 from ui.ai_page import AIPage
 from ui.dashboard_page import DashboardPage
 from ui.global_search_dialog import GlobalSearchDialog
+from ui.variance_report_dialog import VarianceReportDialog
 import i18n
 from i18n import tr
 
@@ -567,9 +568,31 @@ class MainWindow(QMainWindow):
         exit_action = file_menu.addAction(tr("menu_exit"))
         exit_action.triggered.connect(self.close)
 
+        reports_menu = menubar.addMenu(tr("menu_reports"))
+        variance_action = reports_menu.addAction(tr("menu_variance_report"))
+        variance_action.triggered.connect(self._open_variance_report)
+
         help_menu = menubar.addMenu(tr("menu_help"))
         shortcuts_action = help_menu.addAction(tr("menu_keyboard_shortcuts"))
         shortcuts_action.triggered.connect(self._show_shortcuts)
+
+    def _open_variance_report(self):
+        """Reports -> Variance report, pre-filled with the project in focus."""
+        project_id = None
+        project_name = None
+        open_project = getattr(self.tracker_page, "project", None)
+        if open_project:
+            project_id, project_name = open_project["id"], open_project["name"]
+        else:
+            selected = self.projects_page.selected_project_id()
+            if selected is not None:
+                row = self.db.get_project(selected)
+                if row:
+                    project_id, project_name = row["id"], row["name"]
+
+        dialog = VarianceReportDialog(self, self.db, project_id=project_id,
+                                      project_name=project_name)
+        dialog.exec()
 
     def _show_shortcuts(self):
         rows = [

@@ -31,7 +31,7 @@ from collections import defaultdict
 from constants import (
     ATTACHMENT_CATEGORIES,
     ALLOWED_PROJECT_COLS, ALLOWED_SUPPLIER_COLS, ALLOWED_ITEM_COLS,
-    compute_status,
+    compute_status, is_over_supplied, is_over_requested,
 )
 from app_paths import get_app_dir
 
@@ -502,6 +502,76 @@ class Database:
     def get_project_group(self, group_id):
         with self._connect() as conn:
             return conn.execute("SELECT * FROM project_groups WHERE id = ?", (group_id,)).fetchone()
+
+    # ------------------------------------------------------------------ #
+    # Reporting
+    # ------------------------------------------------------------------ #
+    #: Groupings the variance report understands.
+    VARIANCE_GROUPINGS = ("area", "supplier", "status")
+
+    def get_variance_report(self, group_by="area", project_ids=None):
+        """Aggregated supply status per group, for the variance report.
+
+        Quantities are deliberately NOT summed: items inside one group can be
+        measured in different units (عدد / م.ط / مجموعة), so a total would be
+        meaningless. Counts, completion, attention flags and value are
+        comparable - and value is kept per currency rather than converted.
+
+        Returns a list of dicts, sorted by item count descending:
+            group, items, delivered, delivered_pct, awaiting_request,
+            attention, values {currency: amount}, currency, mixed_currency
+        """
+        if group_by not in self.VARIANCE_GROUPINGS:
+            raise ValueError(f"Unknown grouping: {group_by!r}")
+
+        buckets = {}
+        for project in self.get_projects():
+            if project_ids is not None and project["id"] not in project_ids:
+                continue
+            for item in self.get_items(project["id"]):
+                if group_by == "area":
+                    key = (item["pump_station"] or "").strip() or "(no area)"
+                elif group_by == "supplier":
+                    key = (item["supplier_name"] or "").strip() or "(no supplier)"
+                else:
+                    key = item["status"] or "(unknown)"
+
+                bucket = buckets.setdefault(key, {
+                    "group": key, "items": 0, "delivered": 0,
+                    "awaiting_request": 0, "attention": 0, "values": {},
+                })
+                bucket["items"] += 1
+
+                if item["status"] == "Delivered":
+                    bucket["delivered"] += 1
+                if item["status"] == "Not requested":
+                    bucket["awaiting_request"] += 1
+                total = item["total_quantity"] or 0
+                requested = item["requested_quantity"] or 0
+                delivered = item["delivered_quantity"] or 0
+                if (is_over_supplied(total, delivered)
+                        or is_over_requested(total, requested)
+                        or item["status"] == "On Hold"):
+                    bucket["attention"] += 1
+
+                value = total * (item["unit_cost"] or 0)
+                if value:
+                    currency = item["currency"] or "(no currency set)"
+                    bucket["values"][currency] = bucket["values"].get(currency, 0) + value
+
+        rows = []
+        for bucket in buckets.values():
+            items = bucket["items"]
+            values = bucket["values"]
+            rows.append({
+                **bucket,
+                "delivered_pct": (100.0 * bucket["delivered"] / items) if items else 0.0,
+                "currency": max(values, key=values.get) if values else None,
+                "mixed_currency": len(values) > 1,
+            })
+        rows.sort(key=lambda r: (-r["items"], str(r["group"]).lower()))
+        return rows
+
 
     # ---------------- Suppliers ----------------
     def add_supplier(self, name, contact_person="", phone="", email="", notes=""):

@@ -520,6 +520,10 @@ class ProjectsPage(QWidget):
         self._select_row_by_id(project_id)
         return True
 
+    def selected_project_id(self):
+        """Public accessor used by the reports (e.g. to pre-fill the scope)."""
+        return self._selected_project_id()
+
     def _open_selected_project(self):
         pid = self._selected_project_id()
         if pid is None:
