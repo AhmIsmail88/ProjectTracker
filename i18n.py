@@ -62,6 +62,7 @@ STRINGS = {
     "data_folder": {"en": "Data folder", "ar": "مجلد البيانات"},
     "last_auto_backup": {"en": "Last auto-backup", "ar": "آخر نسخة احتياطية تلقائية"},
     "never_yet": {"en": "never yet", "ar": "لم يتم بعد"},
+    "menu_open_logs": {"en": "Open log folder", "ar": "فتح مجلد السجلات"},
     "value_no_data": {"en": "No costs entered yet", "ar": "لم تُدخل تكاليف بعد"},
     "menu_toggle_tip": {"en": "Show / hide the menu", "ar": "إظهار / إخفاء القائمة"},
     "side_collapsed_tip": {"en": "Expand the menu (Ctrl+B)", "ar": "توسيع القائمة (Ctrl+B)"},

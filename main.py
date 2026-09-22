@@ -47,11 +47,57 @@ from ui.global_search_dialog import GlobalSearchDialog
 import i18n
 from i18n import tr
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    handlers=[logging.StreamHandler()],
-)
+def _log_dir():
+    """Where the app writes its log.
+
+    Next to the application, the same place config.json already lives - that
+    folder is writable in this app's portable deployment and is easy for a
+    user to find."""
+    return os.path.join(get_app_dir(), "logs")
+
+
+def _setup_logging():
+    """Log to a rotating file as well as the console.
+
+    A packaged build runs windowed, so it has no console at all: without a
+    file, anything that goes wrong on a user's machine leaves no trace."""
+    handlers = [logging.StreamHandler()]
+    try:
+        from logging.handlers import RotatingFileHandler
+
+        os.makedirs(_log_dir(), exist_ok=True)
+        handlers.append(
+            RotatingFileHandler(
+                os.path.join(_log_dir(), "project_tracker.log"),
+                maxBytes=1_000_000,
+                backupCount=3,
+                encoding="utf-8",
+            )
+        )
+    except Exception:  # noqa: BLE001 - logging must never stop the app
+        pass
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        handlers=handlers,
+    )
+
+
+def _install_excepthook():
+    """Record uncaught exceptions in the log before the default handler runs.
+
+    In a windowed build the user otherwise only sees PyInstaller's traceback
+    dialog, and nothing is kept."""
+    def _hook(exc_type, exc_value, exc_tb):
+        logging.getLogger("project_tracker").critical(
+            "Unhandled exception", exc_info=(exc_type, exc_value, exc_tb)
+        )
+        sys.__excepthook__(exc_type, exc_value, exc_tb)
+
+    sys.excepthook = _hook
+
+
+_setup_logging()
 logger = logging.getLogger(__name__)
 
 
@@ -501,6 +547,9 @@ class MainWindow(QMainWindow):
         open_folder_action = file_menu.addAction(tr("menu_open_data_folder"))
         open_folder_action.triggered.connect(self._open_data_folder)
 
+        logs_action = file_menu.addAction(tr("menu_open_logs"))
+        logs_action.triggered.connect(self._open_logs_folder)
+
         logo_action = file_menu.addAction(tr("menu_company_logo"))
         logo_action.triggered.connect(self._change_company_logo)
 
@@ -594,6 +643,23 @@ class MainWindow(QMainWindow):
     def _remove_company_logo(self):
         config.remove_company_logo()
         self._apply_logo()
+
+    def _open_logs_folder(self):
+        """Opens the folder holding the log file (see _setup_logging)."""
+        folder = _log_dir()
+        try:
+            os.makedirs(folder, exist_ok=True)
+        except OSError:
+            logger.warning("Could not create the log folder %s", folder, exc_info=True)
+            folder = get_app_dir()
+        if sys.platform.startswith("win"):
+            os.startfile(folder)  # noqa: only exists on Windows
+        elif sys.platform == "darwin":
+            import subprocess
+            subprocess.run(["open", folder], check=False)
+        else:
+            import subprocess
+            subprocess.run(["xdg-open", folder], check=False)
 
     def _open_data_folder(self):
         if sys.platform.startswith("win"):
@@ -705,6 +771,7 @@ class MainWindow(QMainWindow):
 
 
 def main():
+    _install_excepthook()
     app_dir = get_app_dir()
     if not getattr(sys, "frozen", False) and app_dir not in sys.path:
         sys.path.insert(0, app_dir)
