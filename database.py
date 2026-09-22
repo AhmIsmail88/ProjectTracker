@@ -524,11 +524,13 @@ class Database:
         if group_by not in self.VARIANCE_GROUPINGS:
             raise ValueError(f"Unknown grouping: {group_by!r}")
 
+        wanted = [p for p in self.get_projects()
+                  if project_ids is None or p["id"] in project_ids]
+        items_by_project = self.get_items_for_projects([p["id"] for p in wanted])
+
         buckets = {}
-        for project in self.get_projects():
-            if project_ids is not None and project["id"] not in project_ids:
-                continue
-            for item in self.get_items(project["id"]):
+        for project in wanted:
+            for item in items_by_project.get(project["id"], []):
                 if group_by == "area":
                     key = (item["pump_station"] or "").strip() or "(no area)"
                 elif group_by == "supplier":
@@ -1175,6 +1177,35 @@ class Database:
                     results.append(row)
         return results
 
+    def get_items_for_projects(self, project_ids=None):
+        """Every active item across projects in ONE query, grouped by project.
+
+        Returns the same rows get_items() returns (supplier name included) but
+        without the N+1 round trips: the Dashboard and the Projects screen used
+        to call get_items() once per project on every refresh.
+        """
+        query = (
+            "SELECT items.*, suppliers.name AS supplier_name "
+            "FROM items LEFT JOIN suppliers ON items.supplier_id = suppliers.id "
+            "WHERE items.is_deleted = 0"
+        )
+        params = []
+        if project_ids is not None:
+            ids = list(project_ids)
+            if not ids:
+                return {}
+            query += f" AND items.project_id IN ({', '.join('?' for _ in ids)})"
+            params += ids
+        query += " ORDER BY items.project_id, items.sort_order, items.id"
+
+        with self._connect() as conn:
+            rows = conn.execute(query, params).fetchall()
+
+        grouped = {}
+        for row in rows:
+            grouped.setdefault(row["project_id"], []).append(row)
+        return grouped
+
     def get_dashboard_summary(self, stale_days=14, project_ids=None):
         """Aggregates status/cost/data-completeness across the given
         projects in one pass — backs the Dashboard screen. project_ids
@@ -1193,9 +1224,13 @@ class Database:
         stale_items = []
         cutoff = datetime.now() - timedelta(days=stale_days)
 
+        # One query for every item, then walked per project in the same
+        # project order as before, so the numbers (and the stale-list order)
+        # are identical to the per-project version.
+        items_by_project = self.get_items_for_projects([p["id"] for p in projects])
+
         for project in projects:
-            items = self.get_items(project["id"])
-            for it in items:
+            for it in items_by_project.get(project["id"], []):
                 total_items += 1
                 status_counts[it["status"]] += 1
                 value_by_currency[it["currency"] or "?"] += (it["total_quantity"] or 0) * (it["unit_cost"] or 0)
@@ -1229,9 +1264,11 @@ class Database:
         An item counts as delivered when its stored status is "Delivered",
         which is exactly the rule compute_status() applies, so this column
         can never disagree with the Dashboard's status breakdown."""
+        projects = self.get_projects()
+        items_by_project = self.get_items_for_projects([p["id"] for p in projects])
         stats = {}
-        for project in self.get_projects():
-            items = self.get_items(project["id"])
+        for project in projects:
+            items = items_by_project.get(project["id"], [])
             delivered = sum(1 for it in items if it["status"] == "Delivered")
             stats[project["id"]] = {"items": len(items), "delivered": delivered}
         return stats
