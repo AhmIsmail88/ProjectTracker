@@ -12,10 +12,10 @@ from PySide6.QtWidgets import (
     QDialog, QFormLayout, QVBoxLayout, QHBoxLayout, QLineEdit, QComboBox,
     QDoubleSpinBox, QTextEdit, QPushButton, QDialogButtonBox, QListWidget,
     QListWidgetItem, QLabel, QFileDialog, QMessageBox, QCheckBox, QWidget,
-    QInputDialog
+    QInputDialog, QSplitter, QStackedWidget
 )
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QColor
+from PySide6.QtGui import QColor, QPixmap
 
 from constants import (
     ATTACHMENT_CATEGORIES, POST_DELIVERY_CATEGORIES_SET, CURRENCIES, STATUSES,
@@ -24,6 +24,19 @@ from constants import (
     DELIVERED_NO_REQUEST_COLOR, DELIVERED_NO_REQUEST_TEXT, OVER_REQUEST_COLOR, OVER_REQUEST_TEXT,
 )
 from i18n import tr
+
+# Optional: PySide6 ships QtPdf, but a trimmed build might not - a missing
+# module must only disable the PDF preview, never break the app.
+try:
+    from PySide6.QtPdf import QPdfDocument
+    from PySide6.QtPdfWidgets import QPdfView
+    PDF_PREVIEW_AVAILABLE = True
+except Exception:  # noqa: BLE001 - optional feature
+    QPdfDocument = QPdfView = None
+    PDF_PREVIEW_AVAILABLE = False
+
+#: Extensions the preview pane can render itself.
+IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".gif", ".webp"}
 
 
 def open_file_externally(path):
@@ -540,7 +553,8 @@ class AttachmentsDialog(QDialog):
         self.db = db
         self.item_id = item_id
         self.setWindowTitle(f"Attachments - {item_name}")
-        self.setMinimumSize(520, 420)
+        self.setMinimumSize(860, 520)
+        self._current_pixmap = None
 
         layout = QVBoxLayout(self)
         layout.addWidget(QLabel(f"Item: {item_name}"))
@@ -558,7 +572,34 @@ class AttachmentsDialog(QDialog):
 
         self.list_widget = QListWidget()
         self.list_widget.itemDoubleClicked.connect(lambda _item: self._open_selected())
-        layout.addWidget(self.list_widget)
+        self.list_widget.currentItemChanged.connect(lambda _a, _b: self._update_preview())
+
+        # List on one side, preview on the other: double-click still opens the
+        # file in its default application, but the common case (checking what a
+        # PR/PO scan actually is) no longer needs to leave the app.
+        self.preview_label = QLabel("Select a file to preview.")
+        self.preview_label.setAlignment(Qt.AlignCenter)
+        self.preview_label.setWordWrap(True)
+        self.preview_label.setMinimumWidth(320)
+
+        self.preview_stack = QStackedWidget()
+        self.preview_stack.addWidget(self.preview_label)
+        self.pdf_view = None
+        self.pdf_document = None
+        if PDF_PREVIEW_AVAILABLE:
+            self.pdf_document = QPdfDocument(self)
+            self.pdf_view = QPdfView()
+            self.pdf_view.setDocument(self.pdf_document)
+            self.pdf_view.setPageMode(QPdfView.PageMode.SinglePage)
+            self.pdf_view.setZoomMode(QPdfView.ZoomMode.FitToWidth)
+            self.preview_stack.addWidget(self.pdf_view)
+
+        splitter = QSplitter(Qt.Horizontal)
+        splitter.addWidget(self.list_widget)
+        splitter.addWidget(self.preview_stack)
+        splitter.setStretchFactor(0, 1)
+        splitter.setStretchFactor(1, 1)
+        layout.addWidget(splitter)
 
         btn_row = QHBoxLayout()
         open_btn = QPushButton("Open")
@@ -582,6 +623,60 @@ class AttachmentsDialog(QDialog):
             list_item = QListWidgetItem(display)
             list_item.setData(Qt.UserRole, dict(att))
             self.list_widget.addItem(list_item)
+
+    def _show_preview_message(self, text):
+        self._current_pixmap = None
+        self.preview_label.setPixmap(QPixmap())   # drop any previous image
+        self.preview_label.setText(text)
+        self.preview_stack.setCurrentIndex(0)
+
+    def _scaled_preview(self):
+        if self._current_pixmap is None:
+            return QPixmap()
+        return self._current_pixmap.scaled(self.preview_label.size(),
+                                           Qt.KeepAspectRatio, Qt.SmoothTransformation)
+
+    def _update_preview(self):
+        """Renders the selected attachment in-app: images directly, PDFs via
+        QtPdf, anything else just tells the user to use Open."""
+        current = self.list_widget.currentItem()
+        att = current.data(Qt.UserRole) if current else None
+        if not att:
+            self._show_preview_message("Select a file to preview.")
+            return
+
+        path = att.get("file_path") or ""
+        extension = os.path.splitext(path)[1].lower()
+
+        if extension in IMAGE_EXTENSIONS and os.path.isfile(path):
+            pixmap = QPixmap(path)
+            if pixmap.isNull():
+                self._show_preview_message("Could not read this image.")
+                return
+            self._current_pixmap = pixmap
+            self.preview_label.setText("")
+            self.preview_label.setPixmap(self._scaled_preview())
+            self.preview_stack.setCurrentIndex(0)
+            return
+
+        if extension == ".pdf" and PDF_PREVIEW_AVAILABLE and os.path.isfile(path):
+            self.pdf_document.load(path)
+            if self.pdf_document.status() == QPdfDocument.Status.Ready:
+                self._current_pixmap = None
+                self.preview_label.setPixmap(QPixmap())
+                self.preview_stack.setCurrentIndex(1)
+                return
+            self._show_preview_message("Could not open this PDF in the app - use Open.")
+            return
+
+        self._show_preview_message(
+            f"No in-app preview for '{extension or 'this file'}'.\nUse Open to view it."
+        )
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if self._current_pixmap is not None:
+            self.preview_label.setPixmap(self._scaled_preview())
 
     def _upload_file(self):
         path, _ = QFileDialog.getOpenFileName(self, "Select file to attach")

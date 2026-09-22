@@ -56,12 +56,6 @@ NUMERIC_COLS = {
      "Remaining to Deliver", "Unit Cost", "Total Cost")
 }
 AREA_REPEAT_MUTED_COLOR = "#94A3B8"  # dims an Area cell that just repeats the row above it
-MISSING_COST_COLOR = "#FEF3C7"  # light amber — flags a 0/blank Unit Cost cell
-MISSING_COST_TEXT = "#78350F"   # dark amber-brown — set explicitly so the text stays
-                                 # readable regardless of theme (dark mode's default light
-                                 # text was nearly invisible on this light background)
-MISSING_PRPO_COLOR = "#FEF3C7"  # same amber — flags an item missing a PR and/or PO attachment
-MISSING_PRPO_TEXT = "#78350F"
 
 
 class DeletedItemsDialog(QDialog):

@@ -27,7 +27,7 @@ class TestImports(unittest.TestCase):
 
     def test_version_bumped(self):
         import constants
-        self.assertEqual(constants.APP_VERSION, "2.31")
+        self.assertEqual(constants.APP_VERSION, "2.32")
 
     def test_i18n_has_menu_keys(self):
         import i18n

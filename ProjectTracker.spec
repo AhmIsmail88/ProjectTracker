@@ -10,7 +10,10 @@ a = Analysis(
     datas=[('assets/app.ico', 'assets')],
     # Arabic PDF support (imported lazily inside export/pdf_export.py):
     # pin them so PyInstaller always bundles them into the exe.
-    hiddenimports=['arabic_reshaper', 'bidi', 'bidi.algorithm'],
+    # The in-app attachment preview renders PDFs with QtPdf; the import is
+    # wrapped in try/except, so list it explicitly.
+    hiddenimports=['arabic_reshaper', 'bidi', 'bidi.algorithm',
+                   'PySide6.QtPdf', 'PySide6.QtPdfWidgets'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

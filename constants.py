@@ -3,7 +3,7 @@ constants.py
 Single source of truth for all shared constants used across the app.
 """
 
-APP_VERSION = "2.31"
+APP_VERSION = "2.32"
 
 # ---- Status definitions ----
 # Order matters: this is the order shown in combo boxes & reports.

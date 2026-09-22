@@ -13,7 +13,7 @@ from PySide6.QtWidgets import (
     QFileDialog, QMessageBox, QTreeWidget, QTreeWidgetItem, QSplitter,
     QProgressBar,
 )
-from PySide6.QtCore import Qt, Signal, QByteArray, QTimer
+from PySide6.QtCore import Qt, Signal, QByteArray, QTimer, QSettings
 from PySide6.QtGui import QPainter
 
 from i18n import tr
@@ -57,13 +57,6 @@ def _stat_card(title, value_text, severity=None):
     return card, value_label
 
 
-def _fit_table_height(table, row_count, row_height=30, header_height=32, max_rows=6):
-    """Sizes a small summary table to its actual content instead of
-    leaving a tall block of empty space below 1-2 rows of data."""
-    visible_rows = max(1, min(row_count, max_rows))
-    table.setFixedHeight(header_height + visible_rows * row_height + 4)
-
-
 def _color_swatch(color_hex):
     sw = QFrame()
     sw.setFixedSize(12, 12)
@@ -75,9 +68,14 @@ class DashboardPage(QWidget):
     #: emitted with (project_id, item_id) when the user picks a stale item to jump to
     item_opened = Signal(int, int)
 
+    #: QSettings key holding the project ids ticked on this screen, so the
+    #: dashboard opens on the same scope the user left it in.
+    SCOPE_SETTING = "dashboard_project_scope"
+
     def __init__(self, db):
         super().__init__()
         self.db = db
+        self._settings = QSettings("ProjectTracker", "MainWindow")
 
         root = QVBoxLayout(self)
         root.setContentsMargins(16, 16, 16, 16)
@@ -276,8 +274,14 @@ class DashboardPage(QWidget):
         self.stale_table.horizontalHeaderItem(3).setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
         self.stale_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.stale_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        # layout_key: the arrangement the user drags is remembered, like the
+        # items and projects tables.
+        configure_interactive_table(self.stale_table, first_col_width=200,
+                                    layout_key="stale_table")
+        # configure_interactive_table installs a NEW vertical header, and a
+        # new header is visible by default - so hiding it has to happen
+        # AFTER that call, otherwise a row-number column reappears.
         self.stale_table.verticalHeader().setVisible(False)
-        configure_interactive_table(self.stale_table, first_col_width=200)
         # Every column stays user-draggable (Interactive) - ResizeToContents
         # both locked the headers AND let a single long project name claim
         # 688px, squeezing Item Name down to 264px / four wrapped lines.
@@ -285,7 +289,7 @@ class DashboardPage(QWidget):
         stale_header.setStretchLastSection(False)
         for _col in range(4):
             stale_header.setSectionResizeMode(_col, QHeaderView.Interactive)
-        self._watch_column_resize(self.stale_table)
+        self._watch_column_resize(self.stale_table, layout_key="stale_table")
         self.stale_table.doubleClicked.connect(self._open_stale_item)
         stale_card.setMinimumWidth(300)
         stale_box.addWidget(self.stale_table, 1)
@@ -319,11 +323,17 @@ class DashboardPage(QWidget):
     #: 688px because of a single long name, leaving Item Name 264px).
     _STALE_COL_WEIGHTS = (0.46, 0.22, 0.18, 0.14)
 
-    def _watch_column_resize(self, table):
+    def _watch_column_resize(self, table, layout_key=None):
         """Remembers that the user has sized this table's columns by hand, so
-        automatic fitting stops fighting them."""
-        table._cols_user_resized = False
+        automatic fitting stops fighting them.
+
+        A layout restored from a previous session counts as the user's own
+        choice too - otherwise the proportional starting widths would
+        overwrite the arrangement they set up."""
         table._cols_fitting = False
+        table._cols_user_resized = bool(
+            layout_key and app_config.load_table_layout(layout_key)
+        )
 
         def _on_resized(*_args):
             if not getattr(table, "_cols_fitting", False):
@@ -365,6 +375,9 @@ class DashboardPage(QWidget):
             for j in range(top.childCount()):
                 top.child(j).setCheckState(0, state)
         self.project_tree.blockSignals(False)
+        # Signals were blocked, so _on_tree_item_changed never ran - persist the
+        # new scope here too, otherwise "Select All"/"Clear" would not stick.
+        self._save_scope(set(self._selected_project_ids() or []))
         self._recompute()
 
     def _export_checked_projects(self):
@@ -652,8 +665,20 @@ class DashboardPage(QWidget):
         node.setExpanded(True)
         return node
 
+    def _saved_scope(self):
+        """The project ids the dashboard had ticked last session (empty set =
+        no filter, i.e. every project)."""
+        raw = self._settings.value(self.SCOPE_SETTING, "")
+        return {int(part) for part in str(raw).split(",") if part.strip().isdigit()}
+
+    def _save_scope(self, ids):
+        self._settings.setValue(self.SCOPE_SETTING, ",".join(str(i) for i in sorted(ids)))
+
     def _reload_project_tree(self):
         previously_checked = set(self._selected_project_ids() or [])
+        if not previously_checked:
+            # First build of this session - restore the scope from last time.
+            previously_checked = self._saved_scope()
         self.project_tree.blockSignals(True)
         self.project_tree.clear()
 
@@ -703,6 +728,7 @@ class DashboardPage(QWidget):
                         parent.setCheckState(0, Qt.PartiallyChecked)
         finally:
             self._tree_updating = False
+        self._save_scope(set(self._selected_project_ids() or []))
         self._recompute()
 
     def reload(self):

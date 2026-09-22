@@ -52,50 +52,6 @@ class EmptyStateTable(QTableWidget):
             painter.end()
 
 
-class EmptyStateTable(QTableWidget):
-    """A QTableWidget that shows a centered friendly message instead of a
-    bare empty grid when there is nothing to display (shared by the
-    Dashboard, Projects and Suppliers tables)."""
-
-    def __init__(self, empty_text, parent=None):
-        super().__init__(parent)
-        self._empty_text = empty_text
-
-    def set_empty_text(self, text):
-        self._empty_text = text
-        self.viewport().update()
-
-    def paintEvent(self, event):
-        super().paintEvent(event)
-        if self.rowCount() == 0:
-            painter = QPainter(self.viewport())
-            painter.setPen(self.palette().color(self.foregroundRole()).lighter(160))
-            painter.drawText(self.viewport().rect(), Qt.AlignCenter, self._empty_text)
-            painter.end()
-
-
-class EmptyStateTable(QTableWidget):
-    """A QTableWidget that shows a centered friendly message instead of a
-    bare empty grid when there is nothing to display (shared by the
-    Dashboard, Projects and Suppliers tables)."""
-
-    def __init__(self, empty_text, parent=None):
-        super().__init__(parent)
-        self._empty_text = empty_text
-
-    def set_empty_text(self, text):
-        self._empty_text = text
-        self.viewport().update()
-
-    def paintEvent(self, event):
-        super().paintEvent(event)
-        if self.rowCount() == 0:
-            painter = QPainter(self.viewport())
-            painter.setPen(self.palette().color(self.foregroundRole()).lighter(160))
-            painter.drawText(self.viewport().rect(), Qt.AlignCenter, self._empty_text)
-            painter.end()
-
-
 def make_separator():
     """A thin vertical divider used to group toolbar buttons visually
     (e.g. Edit group | Order group | Attachments group | ...)."""
