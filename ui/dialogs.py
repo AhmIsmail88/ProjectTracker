@@ -14,7 +14,7 @@ from PySide6.QtWidgets import (
     QListWidgetItem, QLabel, QFileDialog, QMessageBox, QCheckBox, QWidget,
     QInputDialog, QSplitter, QStackedWidget
 )
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QColor, QPixmap
 
 from constants import (
@@ -37,6 +37,42 @@ except Exception:  # noqa: BLE001 - optional feature
 
 #: Extensions the preview pane can render itself.
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".gif", ".webp"}
+
+
+class AutoGrowTextEdit(QTextEdit):
+    """A QTextEdit that grows with its content, up to a ceiling.
+
+    Long item names used to be cut off behind a scrollbar inside a
+    fixed-height box; this keeps the whole value visible. The ceiling stops a
+    pathological paste from pushing the rest of a form off the screen, and
+    height_changed lets the dialog grow with the field instead of squeezing
+    its other rows.
+    """
+
+    height_changed = Signal(int)
+
+    def __init__(self, min_height=56, max_height=200, parent=None):
+        super().__init__(parent)
+        self._min_height = min_height
+        self._max_height = max_height
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.setFixedHeight(min_height)
+        self.textChanged.connect(self._apply_height)
+
+    def _apply_height(self):
+        document = self.document()
+        document.setTextWidth(max(1, self.viewport().width()))
+        needed = int(document.documentLayout().documentSize().height()) + 6
+        target = max(self._min_height, min(needed, self._max_height))
+        if target != self.height():
+            self.setFixedHeight(target)
+            self.height_changed.emit(target)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        # The wrap width changed, so the number of lines may have too.
+        self._apply_height()
 
 
 def open_file_externally(path):
@@ -343,8 +379,8 @@ class ItemDialog(QDialog):
         self.setMinimumWidth(520)
         self._suppliers = list(suppliers or [])
 
-        self.item_name_edit = QTextEdit()
-        self.item_name_edit.setFixedHeight(56)
+        # Grows with the name so a long description stays fully readable.
+        self.item_name_edit = AutoGrowTextEdit(min_height=56, max_height=200)
         self.pump_station_edit = QLineEdit()
 
         supplier_row = QHBoxLayout()
@@ -391,6 +427,9 @@ class ItemDialog(QDialog):
 
         form = QFormLayout()
         form.addRow("Item Name*:", self.item_name_edit)
+        # Keep the form stable: when the name field grows, the window grows
+        # with it instead of compressing the rows underneath.
+        self.item_name_edit.height_changed.connect(lambda _h: self.adjustSize())
         form.addRow("Pump Station / Area:", self.pump_station_edit)
         form.addRow("Supplier:", supplier_row)
         form.addRow("Unit:", self.unit_edit)
