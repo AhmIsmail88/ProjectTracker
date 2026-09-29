@@ -3,7 +3,7 @@ constants.py
 Single source of truth for all shared constants used across the app.
 """
 
-APP_VERSION = "2.32"
+APP_VERSION = "2.33"
 
 # ---- Status definitions ----
 # Order matters: this is the order shown in combo boxes & reports.
@@ -254,3 +254,31 @@ def chart_label_color(theme=None):
     dark colour and vanish on the dark theme."""
     theme = theme or _ACTIVE_THEME
     return "#E8EFF9" if theme == "dark" else "#0E1B30"
+
+
+# --------------------------------------------------------------------------- #
+# Schedule (project time schedule)
+# --------------------------------------------------------------------------- #
+#: Columns an activity update is allowed to touch.
+ALLOWED_SCHEDULE_COLS = (
+    "name", "phase", "start_date", "end_date", "progress", "milestone",
+    "notes", "sort_order", "last_updated",
+)
+
+#: Colours for the painted schedule timeline: the bar body, the completed
+#: part of it, the month grid, and the "today" marker.
+_SCHEDULE_COLORS = {
+    "dark": {"bar": "#26405F", "done": "#1CA5E9", "grid": "#131F31",
+             "today": "#F0B33E", "text": "#E8EFF9", "muted": "#8496B3",
+             "phase": "#5CA8F5", "milestone": "#A78BFA", "panel": "#0D1524",
+             "accent_tint": "#16324A"},
+    "light": {"bar": "#CBDEF1", "done": "#0B82C8", "grid": "#EAEFF7",
+              "today": "#B26E05", "text": "#0E1B30", "muted": "#5D6E8B",
+              "phase": "#1E6FD9", "milestone": "#7C5CD6", "panel": "#FFFFFF",
+              "accent_tint": "#E2F0FA"},
+}
+
+
+def schedule_colors(theme=None):
+    """Theme-aware colours for the schedule timeline."""
+    return _SCHEDULE_COLORS["light" if (theme or _ACTIVE_THEME) == "light" else "dark"]

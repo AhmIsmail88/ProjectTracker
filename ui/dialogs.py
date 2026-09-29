@@ -12,9 +12,9 @@ from PySide6.QtWidgets import (
     QDialog, QFormLayout, QVBoxLayout, QHBoxLayout, QLineEdit, QComboBox,
     QDoubleSpinBox, QTextEdit, QPushButton, QDialogButtonBox, QListWidget,
     QListWidgetItem, QLabel, QFileDialog, QMessageBox, QCheckBox, QWidget,
-    QInputDialog, QSplitter, QStackedWidget
+    QInputDialog, QSplitter, QStackedWidget, QDateEdit, QSpinBox
 )
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, Signal, QDate
 from PySide6.QtGui import QColor, QPixmap
 
 from constants import (
@@ -580,6 +580,109 @@ class ItemDialog(QDialog):
             "po_issued": self.po_issued_check.isChecked(),
             "variance_note": self.variance_note_edit.text().strip(),
             "remarks": self.remarks_edit.toPlainText().strip(),
+        }
+
+
+class ScheduleActivityDialog(QDialog):
+    """Add or edit one activity of a project time schedule.
+
+    Dates are only meaningful together, so both are edited here and validated
+    as a range: storing an end before the start would break both the timeline
+    and the exported report.
+    """
+
+    def __init__(self, parent=None, activity=None, phases=None, project_id=None,
+                 db=None, default_start=None):
+        super().__init__(parent)
+        self.db = db
+        self.project_id = project_id
+        self.activity = activity
+        self.setWindowTitle(tr("schedule_edit_title") if activity else tr("schedule_add_title"))
+        self.setMinimumWidth(440)
+
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+
+        self.name_edit = AutoGrowTextEdit(min_height=32, max_height=120)
+        form.addRow(tr("schedule_col_activity") + "*:", self.name_edit)
+
+        self.phase_combo = QComboBox()
+        self.phase_combo.setEditable(True)
+        existing = [p for p in (phases or []) if p]
+        self.phase_combo.addItems(existing)
+        self.phase_combo.setCurrentText(existing[0] if existing else "")
+        form.addRow(tr("schedule_col_phase") + ":", self.phase_combo)
+
+        today = QDate.currentDate()
+        start = today
+        end = today.addDays(7)
+        if activity:
+            for key, target in (("start_date", "start"), ("end_date", "end")):
+                value = activity[key]
+                if value:
+                    parsed = QDate.fromString(str(value)[:10], "yyyy-MM-dd")
+                    if parsed.isValid():
+                        if target == "start":
+                            start = parsed
+                        else:
+                            end = parsed
+        elif default_start is not None:
+            start = default_start
+            end = default_start.addDays(7)
+
+        self.start_edit = QDateEdit(start)
+        self.start_edit.setCalendarPopup(True)
+        self.start_edit.setDisplayFormat("yyyy-MM-dd")
+        self.end_edit = QDateEdit(end)
+        self.end_edit.setCalendarPopup(True)
+        self.end_edit.setDisplayFormat("yyyy-MM-dd")
+        form.addRow(tr("schedule_col_start") + ":", self.start_edit)
+        form.addRow(tr("schedule_col_end") + ":", self.end_edit)
+
+        self.progress_spin = QSpinBox()
+        self.progress_spin.setRange(0, 100)
+        self.progress_spin.setSuffix(" %")
+        form.addRow(tr("schedule_col_progress") + ":", self.progress_spin)
+
+        self.milestone_check = QCheckBox(tr("schedule_col_milestone"))
+        form.addRow("", self.milestone_check)
+
+        self.notes_edit = AutoGrowTextEdit(min_height=32, max_height=120)
+        form.addRow(tr("schedule_col_notes") + ":", self.notes_edit)
+
+        layout.addLayout(form)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self._on_accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+        if activity:
+            self.name_edit.setPlainText(activity["name"] or "")
+            self.phase_combo.setCurrentText(activity["phase"] or "")
+            self.progress_spin.setValue(int(activity["progress"] or 0))
+            self.milestone_check.setChecked(bool(activity["milestone"]))
+            self.notes_edit.setPlainText(activity["notes"] or "")
+
+    def _on_accept(self):
+        if not self.name_edit.toPlainText().strip():
+            QMessageBox.warning(self, tr("schedule_add_title"), tr("schedule_validate_name"))
+            return
+        if self.end_edit.date() < self.start_edit.date():
+            QMessageBox.warning(self, tr("schedule_add_title"), tr("schedule_validate_dates"))
+            return
+        self.accept()
+
+    def values(self):
+        """The fields to store (dates as YYYY-MM-DD, matching the schema)."""
+        return {
+            "name": self.name_edit.toPlainText().strip(),
+            "phase": self.phase_combo.currentText().strip(),
+            "start_date": self.start_edit.date().toString("yyyy-MM-dd"),
+            "end_date": self.end_edit.date().toString("yyyy-MM-dd"),
+            "progress": self.progress_spin.value(),
+            "milestone": self.milestone_check.isChecked(),
+            "notes": self.notes_edit.toPlainText().strip(),
         }
 
 

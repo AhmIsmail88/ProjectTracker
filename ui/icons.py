@@ -68,6 +68,13 @@ def _theme(p):
     p.drawPath(outer.subtracted(bite))
 
 
+def _gantt(p):
+    # three staggered bars: the schedule glyph
+    p.drawRoundedRect(QRectF(2.2, 3.0, 7.6, 2.9), 1.2, 1.2)
+    p.drawRoundedRect(QRectF(5.0, 7.0, 8.8, 2.9), 1.2, 1.2)
+    p.drawRoundedRect(QRectF(3.4, 11.0, 6.8, 2.9), 1.2, 1.2)
+
+
 def _menu(p):
     for y in (4.0, 8.0, 12.0):
         p.drawLine(QPointF(2.8, y), QPointF(13.2, y))
@@ -88,6 +95,7 @@ _DRAWERS = {
     "search": _search,
     "command": _command,
     "theme": _theme,
+    "gantt": _gantt,
     "menu": _menu,
     "lang": _lang,
 }

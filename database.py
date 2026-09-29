@@ -31,6 +31,7 @@ from collections import defaultdict
 from constants import (
     ATTACHMENT_CATEGORIES,
     ALLOWED_PROJECT_COLS, ALLOWED_SUPPLIER_COLS, ALLOWED_ITEM_COLS,
+    ALLOWED_SCHEDULE_COLS,
     compute_status, is_over_supplied, is_over_requested,
 )
 from app_paths import get_app_dir
@@ -203,6 +204,24 @@ class Database:
                     created_at TEXT NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS idx_chat_scope ON ai_chat_history(scope_project_id);
+
+                CREATE TABLE IF NOT EXISTS schedule_activities (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    project_id INTEGER NOT NULL,
+                    name TEXT NOT NULL,
+                    phase TEXT DEFAULT '',
+                    start_date TEXT,
+                    end_date TEXT,
+                    progress INTEGER DEFAULT 0,
+                    milestone INTEGER DEFAULT 0,
+                    notes TEXT,
+                    sort_order INTEGER DEFAULT 0,
+                    is_deleted INTEGER DEFAULT 0,
+                    deleted_at TEXT,
+                    last_updated TEXT,
+                    FOREIGN KEY (project_id) REFERENCES projects (id) ON DELETE CASCADE
+                );
+                CREATE INDEX IF NOT EXISTS idx_schedule_project ON schedule_activities(project_id);
 
                 CREATE TABLE IF NOT EXISTS project_groups (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -596,6 +615,138 @@ class Database:
         params.append(limit)
         with self._connect() as conn:
             return conn.execute(query, params).fetchall()
+
+
+    # ------------------------------------------------------------------ #
+    # Schedule (project time schedule)
+    # ------------------------------------------------------------------ #
+    @staticmethod
+    def _check_schedule_dates(start_date, end_date):
+        """Raises when the range is impossible, so a bad edit can never be
+        stored - the report and the timeline both assume start <= end."""
+        if start_date and end_date and end_date < start_date:
+            raise ValueError("The end date cannot be before the start date.")
+
+    def _next_schedule_sort_order(self, conn, project_id):
+        row = conn.execute(
+            "SELECT COALESCE(MAX(sort_order), 0) AS m FROM schedule_activities "
+            "WHERE project_id = ? AND is_deleted = 0",
+            (project_id,),
+        ).fetchone()
+        return (row["m"] or 0) + 1
+
+    def get_schedule_activities(self, project_id):
+        """The project's active activities in schedule order."""
+        with self._connect() as conn:
+            return conn.execute(
+                "SELECT * FROM schedule_activities "
+                "WHERE project_id = ? AND is_deleted = 0 "
+                "ORDER BY sort_order, id",
+                (project_id,),
+            ).fetchall()
+
+    def get_schedule_activity(self, activity_id):
+        with self._connect() as conn:
+            return conn.execute(
+                "SELECT * FROM schedule_activities WHERE id = ?", (activity_id,)
+            ).fetchone()
+
+    def add_schedule_activity(self, project_id, name, phase="", start_date=None,
+                              end_date=None, progress=0, milestone=False, notes=""):
+        name = (name or "").strip()
+        if not name:
+            raise ValueError("An activity needs a name.")
+        self._check_schedule_dates(start_date, end_date)
+        progress = max(0, min(100, int(progress or 0)))
+
+        with self._connect() as conn:
+            sort_order = self._next_schedule_sort_order(conn, project_id)
+            cur = conn.execute(
+                """INSERT INTO schedule_activities
+                   (project_id, name, phase, start_date, end_date, progress,
+                    milestone, notes, sort_order, is_deleted, last_updated)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)""",
+                (project_id, name, phase or "", start_date or None,
+                 end_date or None, progress, 1 if milestone else 0,
+                 notes or "", sort_order, now_str()),
+            )
+            activity_id = cur.lastrowid
+            _log_change(conn, "schedule", activity_id, name, project_id, "created")
+        logger.info("Added schedule activity id=%d project=%d", activity_id, project_id)
+        return activity_id
+
+    def update_schedule_activity(self, activity_id, **fields):
+        if not fields:
+            return
+        current = self.get_schedule_activity(activity_id)
+        if current is None:
+            return
+        start_date = fields.get("start_date", current["start_date"])
+        end_date = fields.get("end_date", current["end_date"])
+        self._check_schedule_dates(start_date, end_date)
+        if "progress" in fields:
+            fields["progress"] = max(0, min(100, int(fields["progress"] or 0)))
+        fields["last_updated"] = now_str()
+
+        cols_sql, values, safe_fields = _safe_update(ALLOWED_SCHEDULE_COLS, fields)
+        values.append(activity_id)
+        entity_name = safe_fields.get("name", current["name"])
+        with self._connect() as conn:
+            conn.execute(
+                f"UPDATE schedule_activities SET {cols_sql} WHERE id = ?", values
+            )
+            _log_field_diffs(conn, "schedule", activity_id, entity_name,
+                             current["project_id"], current, safe_fields)
+        logger.info("Updated schedule activity id=%d fields=%s", activity_id, set(fields))
+
+    def delete_schedule_activity(self, activity_id):
+        """Soft delete, so a mistaken removal is recoverable."""
+        activity = self.get_schedule_activity(activity_id)
+        if activity is None:
+            return
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE schedule_activities SET is_deleted = 1, deleted_at = ? WHERE id = ?",
+                (now_str(), activity_id),
+            )
+            _log_change(conn, "schedule", activity_id, activity["name"],
+                        activity["project_id"], "deleted")
+        logger.info("Soft-deleted schedule activity id=%d", activity_id)
+
+    def restore_schedule_activity(self, activity_id):
+        activity = self.get_schedule_activity(activity_id)
+        if activity is None:
+            return
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE schedule_activities SET is_deleted = 0, deleted_at = NULL WHERE id = ?",
+                (activity_id,),
+            )
+            _log_change(conn, "schedule", activity_id, activity["name"],
+                        activity["project_id"], "restored")
+        logger.info("Restored schedule activity id=%d", activity_id)
+
+    def reorder_schedule_activities(self, ordered_activity_ids):
+        """Renumbers the given activities to 1..n in the order supplied."""
+        with self._connect() as conn:
+            for position, activity_id in enumerate(ordered_activity_ids, start=1):
+                conn.execute(
+                    "UPDATE schedule_activities SET sort_order = ? WHERE id = ?",
+                    (position, activity_id),
+                )
+
+    def move_schedule_activity(self, project_id, activity_id, direction):
+        """direction: -1 up, +1 down. Swaps with the neighbour, like items."""
+        activities = list(self.get_schedule_activities(project_id))
+        ids = [a["id"] for a in activities]
+        if activity_id not in ids:
+            return
+        index = ids.index(activity_id)
+        target = index + direction
+        if target < 0 or target >= len(ids):
+            return
+        ids[index], ids[target] = ids[target], ids[index]
+        self.reorder_schedule_activities(ids)
 
 
     # ---------------- Suppliers ----------------

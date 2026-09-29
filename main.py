@@ -43,6 +43,7 @@ from ui.items_page import TrackerPage
 from ui.suppliers_page import SuppliersPage
 from ui.ai_page import AIPage
 from ui.dashboard_page import DashboardPage
+from ui.schedule_page import SchedulePage
 from ui.global_search_dialog import GlobalSearchDialog
 from ui.variance_report_dialog import VarianceReportDialog
 from ui.cost_change_log_dialog import CostChangeLogDialog
@@ -207,6 +208,8 @@ class MainWindow(QMainWindow):
         self.stack.addWidget(self.suppliers_page)   # 2
         self.stack.addWidget(self.ai_page)           # 3
         self.stack.addWidget(self.dashboard_page)    # 4
+        self.schedule_page = SchedulePage(self.db)
+        self.stack.addWidget(self.schedule_page)     # 5
         # Sidebar is added FIRST so Qt puts it on the leading edge in both
         # directions: right under Arabic (RTL), left under English (LTR).
         self.sidebar = self._build_sidebar()
@@ -277,6 +280,12 @@ class MainWindow(QMainWindow):
         items_btn.clicked.connect(lambda: self._navigate(1, "items"))
         layout.addWidget(items_btn)
         self.nav_buttons["items"] = items_btn
+
+        schedule_btn = QPushButton(tr("schedule"))
+        self._prepare_nav_button(schedule_btn, "gantt", checkable=True)
+        schedule_btn.clicked.connect(lambda: self._navigate(5, "schedule"))
+        layout.addWidget(schedule_btn)
+        self.nav_buttons["schedule"] = schedule_btn
 
         layout.addStretch()
 
@@ -395,9 +404,12 @@ class MainWindow(QMainWindow):
                 self.projects_page.select_project(open_project["id"])
         elif key == "dashboard":
             self.dashboard_page.reload()
+        elif key == "schedule":
+            self.schedule_page.reload()
 
     def _open_project(self, project_id):
         self.tracker_page.open_project(project_id)
+        self.schedule_page.open_project(project_id)
         self.stack.setCurrentIndex(1)
         for btn in self.nav_buttons.values():
             btn.setChecked(False)
@@ -409,6 +421,7 @@ class MainWindow(QMainWindow):
         item — used by the Dashboard's stale-items list and by
         Search All Projects."""
         self.tracker_page.open_project(project_id, select_item_id=item_id)
+        self.schedule_page.open_project(project_id)
         self.stack.setCurrentIndex(1)
         for btn in self.nav_buttons.values():
             btn.setChecked(False)
