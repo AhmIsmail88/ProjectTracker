@@ -8,6 +8,7 @@ import unittest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import openpyxl
+import auth
 
 from database import Database
 from export.excel_export import (
@@ -82,6 +83,9 @@ class TestExcelExport(unittest.TestCase):
 class TestExcelCostRoundTrip(unittest.TestCase):
     def test_round_trip_matched_by_item_id(self):
         db, tmp = make_db()
+        manager = db.add_user("cost-manager", "test-password", role="manager")
+        auth.login(db.get_user(manager), db)
+        self.addCleanup(auth.logout)
         pid = db.add_project("Costs")
         a = db.add_item(pid, item_name="A", unit_cost=0)
         b = db.add_item(pid, item_name="B", unit_cost=7)

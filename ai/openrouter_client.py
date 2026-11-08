@@ -18,36 +18,19 @@ import json
 import logging
 
 import requests
-from dotenv import load_dotenv
+from ai.settings import read_settings, settings_path
 
 from app_paths import get_app_dir
 
 logger = logging.getLogger(__name__)
 
 
-def _reload_env():
-    """Re-reads .env every time it's called (cheap — it's a small local
-    text file) rather than caching it once per process. Two real bugs
-    this avoids:
-      1. python-dotenv's load_dotenv() does NOT overwrite a variable that
-         is already set in the process environment by default — so a
-         later edit to .env could silently be ignored unless we pass
-         override=True.
-      2. Caching "already loaded" for the whole app lifetime means
-         editing .env while the app is running would never be picked up
-         without a full restart. Re-reading every call means an edited
-         .env takes effect on your very next AI request."""
-    load_dotenv(os.path.join(get_app_dir(), ".env"), override=True)
-
-
 def is_configured():
-    _reload_env()
-    return bool(os.environ.get("OPENROUTER_API_KEY"))
+    return bool(read_settings()["api_key"])
 
 
 def get_model():
-    _reload_env()
-    return os.environ.get("OPENROUTER_MODEL", "meta-llama/llama-3.3-70b-instruct:free")
+    return read_settings()["model"]
 
 
 class OpenRouterError(Exception):
@@ -70,14 +53,13 @@ def chat(messages, temperature=0.3, timeout=60, max_tokens=4000, allow_reasoning
     with free models on short, structured tasks like ours. The parameter
     is ignored by models that don't support it, so it's safe to always
     send."""
-    _reload_env()
-    api_key = os.environ.get("OPENROUTER_API_KEY")
+    settings = read_settings()
+    api_key = settings["api_key"]
     if not api_key:
         raise OpenRouterError(
-            "OPENROUTER_API_KEY is not set. Create a .env file next to main.py "
-            "(see .env.example) with your OpenRouter API key."
+            "Open AI Settings and enter your OpenRouter API key."
         )
-    model = get_model()
+    model = settings["model"]
 
     payload = {
         "model": model,
@@ -101,13 +83,20 @@ def chat(messages, temperature=0.3, timeout=60, max_tokens=4000, allow_reasoning
         timeout=timeout,
     )
     if resp.status_code != 200:
-        raise OpenRouterError(f"OpenRouter API error {resp.status_code}: {resp.text[:500]}")
+        detail = resp.text.replace(api_key, "[redacted]")[:500]
+        raise OpenRouterError(f"OpenRouter API error {resp.status_code}: {detail}")
     data = resp.json()
     try:
         choice = data["choices"][0]
         content = choice["message"]["content"]
-    except (KeyError, IndexError) as exc:
-        raise OpenRouterError(f"Unexpected OpenRouter response: {data}") from exc
+    except (KeyError, IndexError, TypeError) as exc:
+        raise OpenRouterError("Unexpected response from OpenRouter. Please try again.") from exc
+
+    if isinstance(content, list):
+        content = "\n".join(part.get("text", "") for part in content
+                            if isinstance(part, dict) and isinstance(part.get("text"), str))
+    if content is not None and not isinstance(content, str):
+        raise OpenRouterError("OpenRouter returned an unsupported response format.")
 
     if content is None or not str(content).strip():
         # Some models (especially "reasoning" free-tier models) sometimes
@@ -119,7 +108,7 @@ def chat(messages, temperature=0.3, timeout=60, max_tokens=4000, allow_reasoning
             f"The model returned no usable content (finish_reason={finish_reason}). "
             f"This usually means the configured model is a 'reasoning' model that used its "
             f"whole token budget thinking. Try again, or switch OPENROUTER_MODEL in .env to a "
-            f"plain instruct model, e.g. meta-llama/llama-3.3-70b-instruct:free."
+            f"different model in AI Settings."
         )
     return content
 
@@ -136,9 +125,8 @@ def test_connection():
     named what) you think it is — e.g. Windows silently saving it as
     ".env.txt" when "hide known file extensions" is on."""
     import time
-    env_path = os.path.join(get_app_dir(), ".env")
+    env_path = str(settings_path()) if settings_path().is_file() else os.path.join(get_app_dir(), ".env")
     env_exists = os.path.isfile(env_path)
-    _reload_env()
     model = get_model()
     started = time.monotonic()
     try:

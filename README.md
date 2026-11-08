@@ -7,7 +7,7 @@
 ![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white)
 ![PySide6](https://img.shields.io/badge/GUI-PySide6%20(Qt6)-41CD52?logo=qt&logoColor=white)
 ![SQLite](https://img.shields.io/badge/Storage-SQLite-003B57?logo=sqlite&logoColor=white)
-![Tests](https://img.shields.io/badge/Tests-75%20passing-brightgreen)
+![Tests](https://img.shields.io/badge/Tests-261%20passing-brightgreen)
 ![Platform](https://img.shields.io/badge/Platform-Windows-0078D4)
 
 ---
@@ -36,7 +36,7 @@ Everything lives locally in a single SQLite database plus an attachments folder 
 | 🌐 | **Arabic & English UI** with RTL layout, and **Dark / Light themes** |
 | 🤖 | **Optional AI assistant** — ask questions about your projects ("what's still pending on site A?"), persisted conversation per project/group, quick reports (OpenRouter free-tier friendly) |
 | ⌨️ | **Keyboard-first** — full shortcut set (Ctrl+N/E/D/G, Alt+↑/↓, F2 inline edit, Enter to open), inline editing, bulk edit, find & replace |
-| ✅ | **75 automated regression tests** — status logic, sequence integrity, migrations, search, exports, backups |
+| ✅ | **261 automated regression tests** — status logic, sequence integrity, migrations, search, exports, backups, attachment portability and UI scope handling |
 
 ---
 
@@ -96,9 +96,17 @@ The finished `ProjectTracker.exe` appears in `dist/`. To use the AI assistant in
 python -m unittest discover -s tests
 ```
 
-75 tests covering: status-logic edge cases, sequence integrity (gap-free numbering), soft delete/restore/trash, schema migrations (fresh, old-shaped, idempotent), Arabic and word-order-independent search, bulk find & replace, Excel cost round-trip, PDF export (including Arabic text), automatic backups, the config store, and the frozen-layout self-heal regression.
+261 tests covering: status-logic edge cases, sequence integrity (gap-free numbering), soft delete/restore/trash, schema migrations (fresh, old-shaped, idempotent), Arabic and word-order-independent search, bulk find & replace, Excel cost round-trip, PDF export (including Arabic text), automatic backups, portable attachments, numeric import validation, translated status filtering, remembered table views, explicit dashboard scopes, delayed AI replies, language switching across every screen, background worker handling, numeric inline editing, scaled table layouts, the config store, the frozen-layout self-heal regression, mouse-driven Move/Bulk Edit menus (including submenus, dialogs, Arabic, and keyboard shortcuts), sorted inline edits, hidden selections, deletion provenance, legacy groups, import identifiers, PDF previews, and background-worker lifetimes. See BUG_REVIEW.md for the latest findings.
+
+The Items screen offers saved **All Columns / Delivery / Costs / Documents** views. Less-used filters live under **More Filters**, and secondary commands under **More Actions**. Use the **Interface Size** menu for standard, large or extra-large text. On the Dashboard, **All Projects** is an explicit option; clearing the selection shows an empty scope.
+
+Attachments are stored relative to the data folder. Legacy absolute paths are converted automatically when opening the database, so moved and restored copies use their own attachments. Excel imports report invalid, negative or non-finite quantities/prices instead of replacing them with zero; expand the import result's details to see every rejected row.
 
 ---
+
+The Projects screen uses an expandable Main Project tree and a summary on the right. Selecting a project shows its name, metadata, item counts, delivery progress and purchasing value; selecting a group shows its combined summary. Standalone projects have an Ungrouped branch. BOQ and Schedule have grouped quick project pickers. The BOQ table uses the full width, with bulk actions for selected rows. Active filter chips can be removed individually and totals are shown separately for each currency.
+
+Project summary cards open the project's BOQ with the selected status filter; group cards open a review list limited to that group's projects. Dashboard cards for total items, missing costs, missing documents and stale items open scoped review lists. Attachments are grouped by document category, with a resizable file list and preview, multi-file uploads, metadata and undoable removal.
 
 ## Project structure
 
@@ -126,7 +134,7 @@ ui/
 export/                     # Excel & PDF report generators
 importers/                  # Excel import / cost-update import
 ai/                         # OpenRouter client (optional)
-tests/                      # 75 unittest regression tests
+tests/                      # 261 unittest regression tests
 assets/cover.jpg            # README cover
 ```
 

@@ -1,10 +1,10 @@
 """
 ui/styles.py
-"Command Console" theme for Project Tracker.
+Theme for Project Tracker.
 
-Palette is derived from the company logo (company_logo.png): a deep navy
-base (#0A1220 family) with a sky-blue accent (#1CA5E9) and a deeper logo
-blue (#0078C0). Both the dark and the light theme are built from the same
+Palette follows the company logo: layered navy surfaces with a brighter
+blue accent in dark mode and a deeper blue on white surfaces in light
+mode. Both the dark and the light theme are built from the same
 token set, so the two modes stay visually consistent.
 
 The stylesheet is a %(token)s template because two details genuinely
@@ -23,24 +23,28 @@ Both are substituted at runtime by get_stylesheet().
 # Design tokens
 # --------------------------------------------------------------------------- #
 DARK_TOKENS = {
-    "bg": "#080D17",
-    "panel": "#0D1524",
-    "panel2": "#121C2F",
-    "panel3": "#17233A",
-    "hover": "#16233A",
-    "border": "#1D2B44",
-    "border_soft": "#16233A",
-    "grid": "#152032",
-    "text": "#E8EFF9",
-    "text2": "#B9C6DB",
-    "muted": "#8496B3",
-    "faint": "#5A6C8A",
-    "accent": "#1CA5E9",
-    "accent_hover": "#45B9F2",
-    "accent_deep": "#0078C0",
-    "accent_tint": "#12314A",
-    "accent_tint2": "#1C4A6B",
-    "on_accent": "#04121E",
+    "bg": "#0F172A",
+    "panel": "#162236",
+    "panel2": "#1B293E",
+    "panel3": "#23344C",
+    "sidebar_bg": "#111C2F",
+    "table_bg": "#152135",
+    "table_alt": "#1A2A40",
+    "header_bg": "#23344C",
+    "hover": "#253A55",
+    "border": "#3A4E69",
+    "border_soft": "#2A3B53",
+    "grid": "#2A3B53",
+    "text": "#EFF5FF",
+    "text2": "#CED9EA",
+    "muted": "#A1B2C9",
+    "faint": "#91A4BF",
+    "accent": "#62B5F8",
+    "accent_hover": "#8CCCFF",
+    "accent_deep": "#268BD2",
+    "accent_tint": "#1C3E5B",
+    "accent_tint2": "#2B5B7A",
+    "on_accent": "#081B2C",
     "ok": "#2FCC8F",
     "warn": "#F0B33E",
     "danger": "#F26D6D",
@@ -51,36 +55,40 @@ DARK_TOKENS = {
     "warn_border": "#6B5216",
     "bad_bg": "#331A1E",
     "bad_border": "#6B2733",
-    "field_bg": "#0F1828",
-    "field_focus_bg": "#132135",
-    "sel_bg": "#12314A",
-    "sel_text": "#EAF6FF",
+    "field_bg": "#111F33",
+    "field_focus_bg": "#1B304B",
+    "sel_bg": "#254C70",
+    "sel_text": "#F3F8FF",
     "logo_plate": "#FFFFFF",
     "logo_plate_border": "#E2E9F4",
-    "scroll": "#26374F",
-    "scroll_hover": "#35496A",
-    "tooltip_bg": "#1A2537",
+    "scroll": "#405877",
+    "scroll_hover": "#577498",
+    "tooltip_bg": "#23344C",
     "overlay": "rgba(4,8,15,0.55)",
 }
 
 LIGHT_TOKENS = {
-    "bg": "#E9EEF6",
+    "bg": "#F1F4F8",
     "panel": "#FFFFFF",
-    "panel2": "#F4F7FC",
-    "panel3": "#EBF1F9",
-    "hover": "#EEF3FA",
-    "border": "#D5DFEE",
-    "border_soft": "#E2E9F4",
-    "grid": "#E4EAF4",
-    "text": "#0E1B30",
-    "text2": "#2C3E5C",
-    "muted": "#5D6E8B",
-    "faint": "#8A99B3",
-    "accent": "#0B82C8",
-    "accent_hover": "#0970AC",
-    "accent_deep": "#0078C0",
-    "accent_tint": "#E2F0FA",
-    "accent_tint2": "#BEDDF2",
+    "panel2": "#F8FAFD",
+    "panel3": "#EAF0F7",
+    "sidebar_bg": "#E7EEF7",
+    "table_bg": "#FFFFFF",
+    "table_alt": "#F4F7FB",
+    "header_bg": "#E7EEF7",
+    "hover": "#EAF2FC",
+    "border": "#C7D4E4",
+    "border_soft": "#D7E1ED",
+    "grid": "#E0E7F0",
+    "text": "#16263B",
+    "text2": "#354A63",
+    "muted": "#526782",
+    "faint": "#637793",
+    "accent": "#1268AD",
+    "accent_hover": "#0D568F",
+    "accent_deep": "#0B4C83",
+    "accent_tint": "#DBEBFB",
+    "accent_tint2": "#ADCDEC",
     "on_accent": "#FFFFFF",
     "ok": "#0E9F6E",
     "warn": "#B26E05",
@@ -94,12 +102,12 @@ LIGHT_TOKENS = {
     "bad_border": "#F3C4C4",
     "field_bg": "#FFFFFF",
     "field_focus_bg": "#FFFFFF",
-    "sel_bg": "#E2F0FA",
-    "sel_text": "#0B5C8C",
+    "sel_bg": "#D7EAFE",
+    "sel_text": "#133B63",
     "logo_plate": "#FFFFFF",
     "logo_plate_border": "#E2E9F4",
-    "scroll": "#C4D0E2",
-    "scroll_hover": "#A8B8D0",
+    "scroll": "#A9BCD4",
+    "scroll_hover": "#849DBD",
     "tooltip_bg": "#FFFFFF",
     "overlay": "rgba(16,28,48,0.35)",
 }
@@ -112,14 +120,14 @@ QMainWindow, QDialog {
     color: %(text)s;
 }
 QWidget {
-    font-family: 'Segoe UI', 'Cairo', Tahoma, 'Helvetica Neue', Geneva, Verdana, sans-serif;
-    font-size: 13px;
+    font-family: 'Cairo', 'Segoe UI', Tahoma, sans-serif;
+    font-size: 14px;
     color: %(text)s;
 }
 
 /* ---------- sidebar shell ---------- */
 QWidget#sidebar {
-    background-color: %(panel2)s;
+    background-color: %(sidebar_bg)s;
     border-%(sidebar_edge)s: 1px solid %(border_soft)s;
 }
 QLabel#logoLabel {
@@ -132,7 +140,7 @@ QLabel#logoLabel {
 }
 QLabel#sideSection {
     color: %(faint)s;
-    font-size: 10.5px;
+    font-size: 12px;
     font-weight: 700;
     padding: 12px 12px 4px 12px;
     letter-spacing: 1px;
@@ -184,7 +192,7 @@ QLabel#pageTitle {
 }
 QLabel#breadcrumb {
     color: %(muted)s;
-    font-size: 11.5px;
+    font-size: 12.5px;
 }
 
 /* ---------- buttons ---------- */
@@ -215,8 +223,14 @@ QPushButton#primaryButton {
     font-weight: 700;
 }
 QPushButton#primaryButton:hover {
+    color: %(on_accent)s;
     background-color: %(accent_hover)s;
     border-color: %(accent_hover)s;
+}
+QPushButton#primaryButton:disabled {
+    background-color: %(panel3)s;
+    color: %(faint)s;
+    border-color: %(border_soft)s;
 }
 
 QPushButton#dangerButton {
@@ -254,6 +268,32 @@ QDoubleSpinBox:focus, QSpinBox:focus {
     border: 1px solid %(accent)s;
     background-color: %(field_focus_bg)s;
 }
+QDoubleSpinBox, QSpinBox { padding-%(spin_side)s: 30px; }
+QDoubleSpinBox::up-button, QSpinBox::up-button {
+    subcontrol-origin: border;
+    subcontrol-position: top %(spin_side)s;
+    width: 24px;
+    border: 0px;
+    margin: 3px 3px 0px 3px;
+}
+QDoubleSpinBox::down-button, QSpinBox::down-button {
+    subcontrol-origin: border;
+    subcontrol-position: bottom %(spin_side)s;
+    width: 24px;
+    border: 0px;
+    margin: 0px 3px 3px 3px;
+}
+QDoubleSpinBox::up-arrow, QSpinBox::up-arrow {
+    image: url(%(spin_up_icon)s); width: 10px; height: 6px;
+}
+QDoubleSpinBox::down-arrow, QSpinBox::down-arrow {
+    image: url(%(spin_down_icon)s); width: 10px; height: 6px;
+}
+QDoubleSpinBox::up-button:hover, QSpinBox::up-button:hover,
+QDoubleSpinBox::down-button:hover, QSpinBox::down-button:hover {
+    background-color: %(accent_tint)s;
+    border-radius: 4px;
+}
 QComboBox::drop-down { border: 0px; width: 22px; }
 QComboBox QAbstractItemView {
     background-color: %(panel2)s;
@@ -287,14 +327,38 @@ QListWidget::item:selected, QTreeWidget::item:selected {
 }
 
 /* ---------- tables ---------- */
+QWidget#projectOverview, QScrollArea#projectOverviewScroll {
+    background-color: %(bg)s;
+    border: none;
+}
+QTreeWidget#projectBrowser::item {
+    border: none;
+    border-radius: 0;
+}
+QFrame#detailPanel, QWidget#detailPanel {
+    background-color: %(panel)s;
+    border: 1px solid %(border_soft)s;
+    border-radius: 10px;
+}
+QLabel#detailTitle { font-size: 15px; font-weight: 700; color: %(text)s; }
+QTextBrowser#detailBody { background-color: transparent; border: none; padding: 0; }
+QPushButton#filterChip {
+    background-color: %(accent_tint)s;
+    color: %(accent)s;
+    border: 1px solid %(accent_tint2)s;
+    padding: 4px 8px;
+}
+QFrame#statCard[clickable="true"]:hover, QFrame#statCard[clickable="true"]:focus {
+    border: 1px solid %(accent)s;
+}
 QTableWidget, QTableView {
-    background-color: %(panel2)s;
+    background-color: %(table_bg)s;
     border: 1px solid %(border_soft)s;
     gridline-color: %(grid)s;
     border-radius: 10px;
     selection-background-color: %(sel_bg)s;
     selection-color: %(sel_text)s;
-    alternate-background-color: %(panel)s;
+    alternate-background-color: %(table_alt)s;
 }
 QTableWidget::item, QTableView::item { padding: 3px; }
 QTableWidget::item:hover { background-color: %(hover)s; }
@@ -303,15 +367,17 @@ QTableWidget::item:selected {
     color: %(sel_text)s;
     /* Outline keeps multi-row selection readable even where a cell paints
        its own background brush (Status / warning chips). */
-    border: 1px solid %(accent)s;
+    border-top: 1px solid %(accent_tint2)s;
+    border-bottom: 1px solid %(accent_tint2)s;
 }
+QHeaderView { background-color: %(header_bg)s; }
 QHeaderView::section {
-    background-color: %(panel3)s;
-    color: %(faint)s;
+    background-color: %(header_bg)s;
+    color: %(text2)s;
     padding: 8px 10px;
     border: none;
     border-%(sidebar_edge)s: 1px solid %(border_soft)s;
-    border-bottom: 2px solid %(accent)s;
+    border-bottom: 1px solid %(border)s;
     font-weight: 700;
 }
 QHeaderView::section:hover { background-color: %(hover)s; color: %(text)s; }
@@ -494,10 +560,20 @@ def _render(tokens, rtl):
     # two really do depend on the interface direction.
     values["sidebar_edge"] = "left" if rtl else "right"
     values["groupbox_title_side"] = "right" if rtl else "left"
+    # Spin-box arrows sit on the trailing edge (left in Arabic). The field
+    # padding on that side must leave room for them, or the arrows cover
+    # the number itself.
+    values["spin_side"] = "left" if rtl else "right"
+    # Once the spin-box buttons are styled, Qt stops drawing its own arrows.
+    import os
+    from app_paths import get_resource_dir
+    assets =os.path.join(get_resource_dir(), "assets").replace("\\", "/")
+    values["spin_up_icon"] = f"{assets}/spin_up.svg"
+    values["spin_down_icon"] = f"{assets}/spin_down.svg"
     return _TEMPLATE % values
 
 
-def get_stylesheet(theme, rtl=False):
+def get_stylesheet(theme, rtl=False, scale=1.0):
     """Returns the full QSS for *theme* ("dark" | "light").
 
     *rtl* must match the application layout direction (Arabic = True),
@@ -505,7 +581,10 @@ def get_stylesheet(theme, rtl=False):
     aware. Callers re-fetch this after a language or theme change.
     """
     tokens = DARK_TOKENS if theme == "dark" else LIGHT_TOKENS
-    return _render(tokens, rtl)
+    import re
+    scale = max(1.0, min(float(scale), 1.3))
+    return re.sub(r"font-size:\s*([\d.]+)px", lambda match:
+                  f"font-size: {float(match.group(1)) * scale:g}px", _render(tokens, rtl))
 
 
 # Backwards-compatible module-level constants: some callers/tests may still

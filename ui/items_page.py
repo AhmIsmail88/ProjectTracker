@@ -4,6 +4,8 @@ The "Tracker" screen for a single project: items table (BOQ), filters,
 attachments, manual reordering, and the export/reports section.
 """
 
+from i18n import tr_text
+
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QComboBox,
     QPushButton, QTableWidget, QTableWidgetItem, QAbstractItemView,
@@ -28,6 +30,11 @@ from ui.table_utils import (
 from ui.activity_widget import ActivityListWidget, ActivityDialog
 from i18n import tr
 import config as app_config
+import math
+from collections import defaultdict
+from ui.project_picker import ProjectPicker
+from ui.widgets import FlowLayout
+import auth
 
 ITEM_COLUMNS = [
     "#", "Item Name", "Pump Station / Area", "Supplier", "Unit", "Currency",
@@ -59,28 +66,39 @@ AREA_REPEAT_MUTED_COLOR = "#94A3B8"  # dims an Area cell that just repeats the r
 
 
 class DeletedItemsDialog(QDialog):
-    def __init__(self, parent, db, project_id, on_change=None):
+    def __init__(self, parent, db, project_id, on_change=None, read_only=False):
         super().__init__(parent)
         self.db = db
         self.project_id = project_id
         self.on_change = on_change
-        self.setWindowTitle("Deleted Items")
-        self.setMinimumSize(460, 360)
+        self.read_only = read_only
+        self.setWindowTitle(tr_text("Deleted Items"))
+        self.setMinimumSize(720, 420)
 
         layout = QVBoxLayout(self)
         self.list_widget = QListWidget()
         layout.addWidget(self.list_widget)
 
         btn_row = QHBoxLayout()
-        restore_btn = QPushButton(tr("undo"))
-        restore_btn.clicked.connect(self._restore_selected)
-        purge_btn = QPushButton("Delete Forever")
-        purge_btn.setObjectName("dangerButton")
-        purge_btn.clicked.connect(self._purge_selected)
-        close_btn = QPushButton("Close")
+        self.restore_btn = QPushButton(tr("undo"))
+        self.restore_btn.clicked.connect(self._restore_selected)
+        self.purge_btn = QPushButton(tr_text("Delete Forever"))
+        self.purge_btn.setObjectName("dangerButton")
+        self.purge_btn.clicked.connect(self._purge_selected)
+        if read_only:
+            self.restore_btn.setEnabled(False)
+            self.purge_btn.setEnabled(False)
+            self.restore_btn.setToolTip(tr_text("View only"))
+            self.purge_btn.setToolTip(tr_text("View only"))
+        elif not auth.is_manager(db):
+            # Permanent deletion cannot be undone: managers only. Engineers
+            # can still restore items in their own projects.
+            self.purge_btn.setEnabled(False)
+            self.purge_btn.setToolTip(tr_text("Managers only"))
+        close_btn = QPushButton(tr_text("Close"))
         close_btn.clicked.connect(self.accept)
-        btn_row.addWidget(restore_btn)
-        btn_row.addWidget(purge_btn)
+        btn_row.addWidget(self.restore_btn)
+        btn_row.addWidget(self.purge_btn)
         btn_row.addStretch()
         btn_row.addWidget(close_btn)
         layout.addLayout(btn_row)
@@ -95,7 +113,8 @@ class DeletedItemsDialog(QDialog):
                 (self.project_id,),
             ).fetchall()
         for r in rows:
-            item = QListWidgetItem(f"{r['item_name']}  (deleted {r['deleted_at']})")
+            item = QListWidgetItem(f"{tr_text('deleted')} ⁦{r['deleted_at']}⁩  —  {r['item_name']}")
+            item.setToolTip(r["item_name"])
             item.setData(Qt.UserRole, r["id"])
             self.list_widget.addItem(item)
 
@@ -107,6 +126,8 @@ class DeletedItemsDialog(QDialog):
         return current.data(Qt.UserRole)
 
     def _restore_selected(self):
+        if self.read_only or not auth.can_edit_project(self.db, self.project_id):
+            return
         iid = self._selected_id()
         if iid is None:
             return
@@ -116,11 +137,14 @@ class DeletedItemsDialog(QDialog):
             self.on_change()
 
     def _purge_selected(self):
+        if (self.read_only or not auth.is_manager(self.db)
+                or not auth.can_edit_project(self.db, self.project_id)):
+            return
         iid = self._selected_id()
         if iid is None:
             return
         confirm = QMessageBox.question(self, "Delete forever", "This cannot be undone. Continue?")
-        if confirm == QMessageBox.Yes:
+        if confirm == QMessageBox.Yes and auth.is_manager(self.db):
             self.db.purge_item(iid)
             self._reload()
             if self.on_change:
@@ -129,12 +153,14 @@ class DeletedItemsDialog(QDialog):
 
 class TrackerPage(QWidget):
     back_requested = Signal()
+    project_requested = Signal(int)
 
     def __init__(self, db, undo_bar, parent=None):
         super().__init__(parent)
         self.db = db
         self.undo_bar = undo_bar
         self.project = None
+        self._editable = False
         self._export_worker = None
 
         outer = QVBoxLayout(self)
@@ -143,21 +169,32 @@ class TrackerPage(QWidget):
         # ---- Header: breadcrumb line, then title + subtitle + back ----
         self.breadcrumb_label = QLabel()
         self.breadcrumb_label.setObjectName("breadcrumb")
-        outer.addWidget(self.breadcrumb_label)
+        context_row = QHBoxLayout()
+        context_row.addWidget(self.breadcrumb_label, 1)
+        self.project_picker = ProjectPicker(db)
+        self.project_picker.project_requested.connect(self.project_requested)
+        context_row.addWidget(self.project_picker)
+        outer.addLayout(context_row)
 
         header_row = QHBoxLayout()
+        heading = QVBoxLayout()
+        heading.setSpacing(3)
         self.title_label = QLabel()
         self.title_label.setObjectName("pageTitle")
-        header_row.addWidget(self.title_label)
+        self.title_label.setWordWrap(True)
+        self.title_label.setTextFormat(Qt.PlainText)
+        heading.addWidget(self.title_label)
 
         self.subtitle_label = QLabel()
         self.subtitle_label.setObjectName("breadcrumb")
-        header_row.addWidget(self.subtitle_label)
-        header_row.addStretch()
+        self.subtitle_label.setTextFormat(Qt.PlainText)
+        self.subtitle_label.setWordWrap(True)
+        heading.addWidget(self.subtitle_label)
+        header_row.addLayout(heading, 1)
 
         back_btn = QPushButton(tr("back_to_projects"))
         back_btn.clicked.connect(self.back_requested.emit)
-        header_row.addWidget(back_btn)
+        header_row.addWidget(back_btn, 0, Qt.AlignTop)
         outer.addLayout(header_row)
 
         self.tabs = QTabWidget()
@@ -180,8 +217,13 @@ class TrackerPage(QWidget):
 
     # ------------------------------------------------------------ #
     def open_project(self, project_id, select_item_id=None):
+        changed_project = self.project is not None and self.project["id"] != project_id
         self.project = self.db.get_project(project_id)
+        self.project_picker.set_project(project_id)
+        if changed_project:
+            self._clear_filters()
         self.title_label.setText(self.project["name"])
+        self.title_label.setToolTip(self.project["name"])
         self.breadcrumb_label.setText(f"{tr('projects')}  \u203a  {self.project['name']}")
         bits = [b for b in [self.project["project_number"], self.project["location"], self.project["contractor"]] if b]
         self.subtitle_label.setText("  \u2022  ".join(bits))
@@ -189,6 +231,7 @@ class TrackerPage(QWidget):
             self.tabs.setCurrentIndex(0)  # make sure the Items tab is what's shown
             self._clear_filters()  # a stale filter from a previous project could hide the target item
         self.reload_items(select_item_id=select_item_id)
+        self._apply_permissions()
         if self.tabs.currentIndex() == 2:
             self.activity_view.load(project_id=self.project["id"])
 
@@ -234,8 +277,9 @@ class TrackerPage(QWidget):
         self.search_edit.textChanged.connect(self._apply_filters)
 
         self.status_filter = QComboBox()
-        self.status_filter.addItem(tr("all_statuses"))
-        self.status_filter.addItems(STATUS_OPTIONS)
+        self.status_filter.addItem(tr("all_statuses"), None)
+        for status in STATUS_OPTIONS:
+            self.status_filter.addItem(tr_text(status), status)
         self.status_filter.currentIndexChanged.connect(self._apply_filters)
 
         self.supplier_filter = QComboBox()
@@ -246,97 +290,107 @@ class TrackerPage(QWidget):
         self.area_filter.addItem(tr("all_areas"))
         self.area_filter.currentIndexChanged.connect(self._apply_filters)
 
-        self.missing_cost_check = QCheckBox("\u26A0 Missing Unit Cost only")
+        self.missing_cost_check = QCheckBox(tr_text("\u26A0 Missing Unit Cost only"))
         self.missing_cost_check.setToolTip(
-            "Show only items where Unit Cost is 0 (or blank) — useful when filling in pricing data."
+            tr_text("Show only items where Unit Cost is 0 (or blank) — useful when filling in pricing data.")
         )
         self.missing_cost_check.stateChanged.connect(self._apply_filters)
 
-        self.missing_prpo_check = QCheckBox("\u26A0 Missing PR/PO only")
+        self.missing_prpo_check = QCheckBox(tr_text("\u26A0 Missing PR/PO only"))
         self.missing_prpo_check.setToolTip(
-            "Show only items missing a PR and/or PO attachment — useful when chasing down documentation."
+            tr_text("Show only items missing a PR and/or PO attachment — useful when chasing down documentation.")
         )
         self.missing_prpo_check.stateChanged.connect(self._apply_filters)
 
         filter_row.addWidget(self.search_edit, 3)
         filter_row.addWidget(self.status_filter, 1)
-        filter_row.addWidget(self.supplier_filter, 1)
-        filter_row.addWidget(self.area_filter, 1)
-        filter_row.addWidget(self.missing_cost_check)
-        filter_row.addWidget(self.missing_prpo_check)
+        self.advanced_filters_btn = QPushButton(tr_text("More Filters"))
+        self.advanced_filters_btn.setCheckable(True)
+        filter_row.addWidget(self.advanced_filters_btn)
+        self.view_combo = QComboBox()
+        self.view_combo.setAccessibleName(tr_text("Table View"))
+        for key, label in (("all", "All Columns"), ("delivery", "Delivery"),
+                           ("costs", "Costs"), ("documents", "Documents")):
+            self.view_combo.addItem(tr_text(label), key)
+        filter_row.addWidget(self.view_combo)
         layout.addLayout(filter_row)
+        self.advanced_filters_panel = QWidget()
+        advanced_row = QHBoxLayout(self.advanced_filters_panel)
+        advanced_row.setContentsMargins(0, 0, 0, 0)
+        advanced_row.addWidget(self.supplier_filter, 1)
+        advanced_row.addWidget(self.area_filter, 1)
+        advanced_row.addWidget(self.missing_cost_check)
+        advanced_row.addWidget(self.missing_prpo_check)
+        self.advanced_filters_panel.setVisible(False)
+        self.advanced_filters_btn.toggled.connect(self.advanced_filters_panel.setVisible)
+        layout.addWidget(self.advanced_filters_panel)
+        self.filter_chips = QWidget()
+        self.filter_chips_layout = FlowLayout(self.filter_chips)
+        self.filter_chips_layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(self.filter_chips)
 
         btn_row = QHBoxLayout()
 
         # -- Group 1: edit --
-        add_btn = QPushButton(tr("add_item"))
-        add_btn.setObjectName("primaryButton")
-        add_btn.setToolTip("Ctrl+N")
-        add_btn.clicked.connect(self._add_item)
+        self.add_btn = QPushButton(tr("add_item"))
+        self.add_btn.setObjectName("primaryButton")
+        self.add_btn.setToolTip("Ctrl+N")
+        self.add_btn.clicked.connect(self._add_item)
 
-        edit_btn = QPushButton(tr("edit_item"))
-        edit_btn.setToolTip("Ctrl+E")
-        edit_btn.clicked.connect(self._edit_item)
+        self.edit_btn = QPushButton(tr("edit_item"))
+        self.edit_btn.setToolTip("Ctrl+E")
+        self.edit_btn.clicked.connect(self._edit_item)
 
-        duplicate_btn = QPushButton(tr("duplicate"))
-        duplicate_btn.setToolTip("Ctrl+D \u2014 select several items to duplicate them all at once")
-        duplicate_btn.clicked.connect(self._duplicate_item)
+        self.attach_btn = QPushButton(tr("attachments"))
+        self.attach_btn.clicked.connect(self._open_attachments)
 
-        bulk_edit_btn = QPushButton("\u270E Bulk Edit \u25BE")
-        bulk_edit_btn.setToolTip("Change fields, or find & replace text, across several selected items at once")
-        bulk_edit_menu = QMenu(bulk_edit_btn)
-        bulk_edit_menu.addAction("Edit Fields\u2026", self._bulk_edit)
-        bulk_edit_menu.addAction("\U0001F504 Find & Replace\u2026", self._find_replace)
-        bulk_edit_btn.setMenu(bulk_edit_menu)
-
-        delete_btn = QPushButton(tr("delete_item"))
-        delete_btn.setObjectName("dangerButton")
-        delete_btn.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_TrashIcon))
-        delete_btn.setToolTip("Delete key")
-        delete_btn.clicked.connect(self._delete_item)
-
-        # -- Group 2: order (single dropdown button — keeps the toolbar
-        # from turning into a wall of buttons; all 5 actions keep their
-        # keyboard shortcuts too, so nothing is slower to reach) --
-        move_btn = QPushButton("\u2195 " + tr("move"))
-        move_btn.setToolTip("Reorder the selected item(s)")
-        move_menu = QMenu(move_btn)
-        move_menu.addAction(self.style().standardIcon(QStyle.StandardPixmap.SP_ArrowUp),
-                             tr("move_up") + "\tAlt+\u2191", lambda: self._move_item(-1))
-        move_menu.addAction(self.style().standardIcon(QStyle.StandardPixmap.SP_ArrowDown),
-                             tr("move_down") + "\tAlt+\u2193", lambda: self._move_item(1))
-        move_menu.addSeparator()
-        move_menu.addAction("\u21DE Move to Top\tCtrl+Alt+\u2191", lambda: self._move_to_edge(True))
-        move_menu.addAction("\u21E0 Move to Bottom\tCtrl+Alt+\u2193", lambda: self._move_to_edge(False))
-        move_menu.addAction("\U0001F3AF Move to Position\u2026\tCtrl+G", self._move_to_position)
-        move_btn.setMenu(move_menu)
-
-        # -- Group 3: attachments / history --
-        attach_btn = QPushButton(tr("attachments"))
-        attach_btn.clicked.connect(self._open_attachments)
-
-        history_btn = QPushButton(tr("history"))
-        history_btn.clicked.connect(self._open_item_history)
-
-        # -- Group 4: trash --
-        deleted_btn = QPushButton(tr("trash"))
-        deleted_btn.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_TrashIcon))
-        deleted_btn.clicked.connect(self._open_deleted_items)
-
-        for w in (add_btn, edit_btn, duplicate_btn, bulk_edit_btn, delete_btn):
+        for w in (self.add_btn, self.edit_btn, self.attach_btn):
             btn_row.addWidget(w)
-        btn_row.addWidget(make_separator())
-        btn_row.addWidget(move_btn)
-        btn_row.addWidget(make_separator())
-        for w in (attach_btn, history_btn):
-            btn_row.addWidget(w)
+        # -- Group 2: selection actions (shown only while rows are selected) --
+        # Kept inside the same command row so the toolbar stays one tidy
+        # line and the table does not jump down when a selection appears.
+        self.selection_bar = QWidget()
+        selection_actions = QHBoxLayout(self.selection_bar)
+        selection_actions.setContentsMargins(0, 0, 0, 0)
+        selection_actions.addWidget(make_separator())
+        self.selection_label = QLabel()
+        selection_actions.addWidget(self.selection_label)
+        self._selection_buttons = []
+        for label, callback in (("Duplicate", self._duplicate_item), ("Bulk Edit", None),
+                                ("Move", None), ("Delete", self._delete_item)):
+            button = QPushButton(tr_text(label))
+            if callback:
+                button.clicked.connect(callback)
+            else:
+                # Each popup belongs to its visible button. Sharing a menu with
+                # a submenu or a discarded button can prevent it from opening.
+                factory = self._create_bulk_edit_menu if label == "Bulk Edit" else self._create_move_menu
+                button.setMenu(factory(button))
+            if label == "Delete":
+                button.setObjectName("dangerButton")
+            self._selection_buttons.append(button)
+            selection_actions.addWidget(button)
+        self.selection_bar.hide()
+        btn_row.addWidget(self.selection_bar)
+        self.readonly_label = QLabel(tr_text("View only"))
+        self.readonly_label.setObjectName("breadcrumb")
+        self.readonly_label.setToolTip(tr_text("This project is view-only for you - you can view it and export reports, but not change its data."))
+        self.readonly_label.hide()
+        btn_row.addWidget(self.readonly_label)
         btn_row.addStretch()
-        btn_row.addWidget(deleted_btn)
+        more_btn = QPushButton(tr_text("More Actions"))
+        more_menu = QMenu(more_btn)
+        self.history_action = more_menu.addAction(tr("history"), self._open_item_history)
+        self.history_action.setEnabled(False)
+        more_menu.addSeparator()
+        more_menu.addAction(tr("trash"), self._open_deleted_items)
+        more_btn.setMenu(more_menu)
+        btn_row.addWidget(more_btn)
         layout.addLayout(btn_row)
 
         self.items_table = QTableWidget()
         self.items_table.setColumnCount(len(ITEM_COLUMNS))
-        self.items_table.setHorizontalHeaderLabels(ITEM_COLUMNS)
+        self.items_table.setHorizontalHeaderLabels([tr_text(label) for label in ITEM_COLUMNS])
         # Double-click or start typing to edit — but only Unit Cost /
         # Requested / Delivered Qty are actually editable (see
         # _populate_items_table, which strips the editable flag from
@@ -367,6 +421,10 @@ class TrackerPage(QWidget):
             # First run (or the user never rearranged this table) — give
             # Item Name more breathing room than the generic default.
             self.items_table.setColumnWidth(COL_ITEM_NAME, 240)
+        saved_view = app_config.load_items_view()
+        self.view_combo.setCurrentIndex(max(0, self.view_combo.findData(saved_view)))
+        self.view_combo.currentIndexChanged.connect(self._apply_table_view)
+        self._apply_table_view()
 
         self.items_table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.items_table.customContextMenuRequested.connect(self._show_items_context_menu)
@@ -379,49 +437,146 @@ class TrackerPage(QWidget):
         # whenever the user re-sorts by clicking a column header — both
         # are computed from the table's current row order.
         self.items_table.horizontalHeader().sortIndicatorChanged.connect(lambda *_: self._apply_filters())
-        layout.addWidget(self.items_table)
+        layout.addWidget(self.items_table, 1)
+        self.items_table.itemSelectionChanged.connect(self._update_selection_ui)
 
         status_row = QHBoxLayout()
         self.items_summary_label = QLabel()
-        self.items_summary_label.setStyleSheet("QLabel { font-size: 11px; padding: 4px; }")
-        status_row.addWidget(self.items_summary_label)
-        status_row.addStretch()
-        self.clear_filters_btn = QPushButton("\u2715 Clear Filters")
+        self.items_summary_label.setObjectName("breadcrumb")
+        status_row.addWidget(self.items_summary_label, 1)
+        self.clear_filters_btn = QPushButton(tr_text("\u2715 Clear Filters"))
         self.clear_filters_btn.setVisible(False)
         self.clear_filters_btn.clicked.connect(self._clear_filters)
         status_row.addWidget(self.clear_filters_btn)
         layout.addLayout(status_row)
 
         hint = QLabel(
-            "Ctrl/Shift+Click to select multiple rows. Duplicate now inserts copies right next to the "
+            tr_text("Ctrl/Shift+Click to select multiple rows. Duplicate now inserts copies right next to the "
             "original. For long lists: Top/Bottom (Ctrl+Alt+\u2191/\u2193) or Move to\u2026 (Ctrl+G) jumps "
-            "instantly instead of stepping through every row."
+            "instantly instead of stepping through every row.")
         )
         hint.setObjectName("breadcrumb")
         hint.setWordWrap(True)
         layout.addWidget(hint)
 
+        self._apply_permissions()
+
         return widget
+
+    def _can_edit(self):
+        """True when the signed-in user may change data in the open project."""
+        return (self.project is not None
+                and auth.can_edit_project(self.db, self.project["id"]))
+
+    def _apply_permissions(self):
+        """Reflect the current user's rights on every edit entry point."""
+        editable = self._can_edit()
+        self._editable = editable
+        readonly_tip = tr_text(
+            "This project is view-only for you - you can view it and export reports, but not change its data.")
+        for button in (getattr(self, "add_btn", None), getattr(self, "edit_btn", None)):
+            if button is not None:
+                button.setEnabled(editable)
+                button.setToolTip("Ctrl+N" if editable and button is getattr(self, "add_btn", None)
+                                  else "Ctrl+E" if editable else readonly_tip)
+        if getattr(self, "attach_btn", None) is not None:
+            # Attachments stay openable for reading, even in view-only mode.
+            self.attach_btn.setEnabled(self.project is not None)
+        for button in getattr(self, "_selection_buttons", []):
+            button.setEnabled(editable)
+        if getattr(self, "readonly_label", None) is not None:
+            self.readonly_label.setVisible(self.project is not None and not editable)
+        triggers = (QAbstractItemView.DoubleClicked | QAbstractItemView.EditKeyPressed
+                    if editable else QAbstractItemView.NoEditTriggers)
+        if hasattr(self, "items_table"):
+            self.items_table.setEditTriggers(triggers)
+        if not editable and getattr(self, "selection_bar", None) is not None:
+            self.selection_bar.hide()
+
+    def _update_selection_ui(self, *_):
+        if self._populating_table:
+            return
+        ids = self._selected_item_ids()
+        self.selection_label.setText(tr_text("{count} items selected").format(count=len(ids)))
+        self.selection_bar.setVisible(bool(ids) and getattr(self, "_editable", False))
+        self.history_action.setEnabled(len(ids) == 1)
+
+    def _update_filter_chips(self):
+        while self.filter_chips_layout.count():
+            child = self.filter_chips_layout.takeAt(0)
+            if child.widget():
+                child.widget().deleteLater()
+        active = []
+        if self.search_edit.text().strip():
+            active.append((tr_text("Search") + ": " + self.search_edit.text().strip(), self.search_edit.clear))
+        for combo, label in ((self.status_filter, "Status"), (self.supplier_filter, "Supplier"), (self.area_filter, "Area")):
+            if combo.currentIndex() > 0:
+                active.append((tr_text(label) + ": " + combo.currentText(), lambda _checked=False, c=combo: c.setCurrentIndex(0)))
+        for check in (self.missing_cost_check, self.missing_prpo_check):
+            if check.isChecked():
+                active.append((check.text(), lambda _checked=False, c=check: c.setChecked(False)))
+        for caption, callback in active:
+            chip = QPushButton(self.fontMetrics().elidedText(caption, Qt.ElideRight, 240) + " ×")
+            chip.setObjectName("filterChip")
+            chip.setToolTip(caption + "\n" + tr_text("Remove this filter"))
+            chip.clicked.connect(callback)
+            self.filter_chips_layout.addWidget(chip)
+        self.filter_chips.setVisible(bool(active))
+
+    def _apply_table_view(self, *_):
+        view = self.view_combo.currentData()
+        columns = {
+            "delivery": {"#", "Item Name", "Pump Station / Area", "Supplier", "Unit", "Total Qty",
+                         "Requested Qty", "Delivered Qty", "Remaining to Deliver", "Status"},
+            "costs": {"#", "Item Name", "Supplier", "Unit", "Currency", "Total Qty", "Unit Cost", "Total Cost"},
+            "documents": {"#", "Item Name", "Supplier", "Requested Qty", "Delivered Qty", "PR/PO", "Status"},
+        }.get(view, set(ITEM_COLUMNS))
+        for col, name in enumerate(ITEM_COLUMNS):
+            self.items_table.setColumnHidden(col, name not in columns)
+        app_config.save_items_view(view)
+
+    def _create_bulk_edit_menu(self, parent):
+        menu = QMenu(parent)
+        menu.addAction(tr_text("Edit Fields…"), self._bulk_edit)
+        menu.addAction(tr_text("Find & Replace…"), self._find_replace)
+        return menu
+
+    def _create_move_menu(self, parent):
+        menu = QMenu(parent)
+        menu.addAction(self.style().standardIcon(QStyle.StandardPixmap.SP_ArrowUp),
+                       tr("move_up") + "\tAlt+↑", lambda: self._move_item(-1))
+        menu.addAction(self.style().standardIcon(QStyle.StandardPixmap.SP_ArrowDown),
+                       tr("move_down") + "\tAlt+↓", lambda: self._move_item(1))
+        menu.addSeparator()
+        menu.addAction(tr_text("⇞ Move to Top\tCtrl+Alt+↑"), lambda: self._move_to_edge(True))
+        menu.addAction(tr_text("⇠ Move to Bottom\tCtrl+Alt+↓"), lambda: self._move_to_edge(False))
+        menu.addAction(tr_text("🎯 Move to Position…\tCtrl+G"), self._move_to_position)
+        return menu
 
     def _show_items_context_menu(self, pos):
         menu = QMenu(self)
         add_action = menu.addAction(tr("add_item"))
         edit_action = menu.addAction(tr("edit_item"))
         dup_action = menu.addAction(tr("duplicate"))
-        bulk_edit_action = menu.addAction("\u270E Bulk Edit\u2026")
-        find_replace_action = menu.addAction("\U0001F504 Find & Replace\u2026")
+        bulk_edit_action = menu.addAction(tr_text("\u270E Bulk Edit\u2026"))
+        find_replace_action = menu.addAction(tr_text("\U0001F504 Find & Replace\u2026"))
         delete_action = menu.addAction(tr("delete_item"))
         menu.addSeparator()
         up_action = menu.addAction(tr("move_up"))
         down_action = menu.addAction(tr("move_down"))
-        top_action = menu.addAction("\u21DE Move to Top")
-        bottom_action = menu.addAction("\u21E0 Move to Bottom")
-        goto_action = menu.addAction("\U0001F3AF Move to Position\u2026")
+        top_action = menu.addAction(tr_text("\u21DE Move to Top"))
+        bottom_action = menu.addAction(tr_text("\u21E0 Move to Bottom"))
+        goto_action = menu.addAction(tr_text("\U0001F3AF Move to Position\u2026"))
         menu.addSeparator()
         attach_action = menu.addAction(tr("attachments"))
         history_action = menu.addAction(tr("history"))
         menu.addSeparator()
-        reset_cols_action = menu.addAction("\u21BA Reset Columns to Default")
+        reset_cols_action = menu.addAction(tr_text("\u21BA Reset Columns to Default"))
+        if not self._can_edit():
+            for action_item in (add_action, edit_action, dup_action, bulk_edit_action,
+                                find_replace_action, delete_action, up_action, down_action,
+                                top_action, bottom_action, goto_action):
+                action_item.setEnabled(False)
 
         action = menu.exec(self.items_table.mapToGlobal(pos))
         if action == add_action:
@@ -490,6 +645,7 @@ class TrackerPage(QWidget):
         ids_to_select = select_item_ids or ([select_item_id] if select_item_id is not None else None)
         if ids_to_select:
             self._select_rows_by_item_ids(ids_to_select)
+        self._apply_permissions()
 
     @staticmethod
     def _make_numeric_cell(val, col):
@@ -515,20 +671,22 @@ class TrackerPage(QWidget):
         tooltip_parts = []
         if over:
             bg, fg = special_chip_colors("over_supply")
-            cell.setText(f"{it['status']} \u26A0")
+            cell.setText(f"{tr_text(it['status'])} \u26A0")
             tooltip_parts.append("Delivered quantity exceeds Total quantity.")
         elif delivered_no_request:
             bg, fg = special_chip_colors("no_request")
-            cell.setText(f"{it['status']} \u26A0")
+            cell.setText(f"{tr_text(it['status'])} \u26A0")
             tooltip_parts.append(
                 "Delivered quantity is recorded but nothing was ever requested for this item."
             )
         elif over_requested:
             bg, fg = special_chip_colors("over_request")
-            cell.setText(f"{it['status']} \u26A0")
+            cell.setText(f"{tr_text(it['status'])} \u26A0")
             tooltip_parts.append("Requested quantity exceeds Total quantity.")
         else:
             bg, fg = status_chip_colors(it["status"])
+            cell.setText(tr_text(it["status"]))
+        cell.setData(Qt.UserRole, it["status"])
         cell.setBackground(QColor(bg))
         cell.setForeground(QColor(fg))
         if it["variance_note"]:
@@ -564,6 +722,8 @@ class TrackerPage(QWidget):
         delivered = it["delivered_quantity"] or 0
 
         self._populating_table = True
+        sorting = self.items_table.isSortingEnabled()
+        self.items_table.setSortingEnabled(False)
         try:
             updates = {
                 COL_REQUESTED_QTY: requested,
@@ -577,7 +737,7 @@ class TrackerPage(QWidget):
                 cell = self._make_numeric_cell(val, col)
                 if col in INLINE_EDITABLE_COLS:
                     cell.setFlags(cell.flags() | Qt.ItemIsEditable)
-                    cell.setToolTip("Double-click or press F2 to edit directly")
+                    cell.setToolTip(tr_text("Double-click or press F2 to edit directly"))
                 else:
                     cell.setFlags(cell.flags() & ~Qt.ItemIsEditable)
                 self.items_table.setItem(row, col, cell)
@@ -592,9 +752,10 @@ class TrackerPage(QWidget):
                 unit_cost_cell.setBackground(QColor(_warn_bg))
                 unit_cost_cell.setForeground(QColor(_warn_fg))
                 unit_cost_cell.setToolTip(
-                    "No unit cost entered yet \u2014 double-click or press F2 to fill it in"
+                    tr_text("No unit cost entered yet \u2014 double-click or press F2 to fill it in")
                 )
         finally:
+            self.items_table.setSortingEnabled(sorting)
             self._populating_table = False
 
         self._update_items_summary()
@@ -633,7 +794,7 @@ class TrackerPage(QWidget):
                 "Pump Station / Area": it["pump_station"],
                 "Supplier": it["supplier_name"] or "-",
                 "Unit": it["unit"],
-                "Currency": it["currency"] or "-",
+                "Currency": it["currency"] or (self.project["currency"] if self.project else "-") or "-",
                 "Total Qty": total,
                 "Requested Qty": requested,
                 "Delivered Qty": delivered,
@@ -654,7 +815,7 @@ class TrackerPage(QWidget):
 
                 if col in INLINE_EDITABLE_COLS:
                     cell.setFlags(cell.flags() | Qt.ItemIsEditable)
-                    cell.setToolTip("Double-click or press F2 to edit directly")
+                    cell.setToolTip(tr_text("Double-click or press F2 to edit directly"))
                 else:
                     cell.setFlags(cell.flags() & ~Qt.ItemIsEditable)
 
@@ -668,13 +829,13 @@ class TrackerPage(QWidget):
                     _warn_bg, _warn_fg = warning_chip_colors("missing_cost")
                     cell.setBackground(QColor(_warn_bg))
                     cell.setForeground(QColor(_warn_fg))
-                    cell.setToolTip("No unit cost entered yet \u2014 double-click or press F2 to fill it in")
+                    cell.setToolTip(tr_text("No unit cost entered yet \u2014 double-click or press F2 to fill it in"))
 
                 if col == COL_PRPO and not (has_pr and has_po):
                     _warn_bg, _warn_fg = warning_chip_colors("missing_prpo")
                     cell.setBackground(QColor(_warn_bg))
                     cell.setForeground(QColor(_warn_fg))
-                    cell.setToolTip("Open Attachments to add the missing PR/PO document")
+                    cell.setToolTip(tr_text("Open Attachments to add the missing PR/PO document"))
 
                 self.items_table.setItem(row, col, cell)
 
@@ -693,6 +854,8 @@ class TrackerPage(QWidget):
         rows = sorted({idx.row() for idx in self.items_table.selectedIndexes()})
         ids = []
         for row in rows:
+            if self.items_table.isRowHidden(row):
+                continue
             name_item = self.items_table.item(row, COL_ITEM_NAME)
             if name_item:
                 ids.append(name_item.data(Qt.UserRole))
@@ -712,7 +875,7 @@ class TrackerPage(QWidget):
         first_item = None
         for row in range(self.items_table.rowCount()):
             name_item = self.items_table.item(row, COL_ITEM_NAME)
-            if name_item and name_item.data(Qt.UserRole) in id_set:
+            if name_item and name_item.data(Qt.UserRole) in id_set and not self.items_table.isRowHidden(row):
                 if first_item is None:
                     first_item = name_item
                 selection_model.select(
@@ -726,7 +889,7 @@ class TrackerPage(QWidget):
 
     def _apply_filters(self):
         search_text = self.search_edit.text().strip().lower()
-        status_filter = self.status_filter.currentText()
+        status_filter = self.status_filter.currentData()
         supplier_filter = self.supplier_filter.currentText()
         area_filter = self.area_filter.currentText()
         missing_cost_only = self.missing_cost_check.isChecked()
@@ -734,6 +897,7 @@ class TrackerPage(QWidget):
 
         visible_count = 0
         total_cost_visible = 0.0
+        value_by_currency = defaultdict(float)
         last_visible_area = None
 
         for row in range(self.items_table.rowCount()):
@@ -750,8 +914,8 @@ class TrackerPage(QWidget):
             show = True
             if search_text and search_text not in (name_item.text() or "").lower():
                 show = False
-            if show and status_filter != tr("all_statuses"):
-                status_text = (status_item.text() if status_item else "").replace(" \u26A0", "")
+            if show and status_filter is not None:
+                status_text = status_item.data(Qt.UserRole) if status_item else ""
                 if status_text != status_filter:
                     show = False
             if show and supplier_filter != tr("all_suppliers"):
@@ -770,12 +934,17 @@ class TrackerPage(QWidget):
                     show = False
 
             self.items_table.setRowHidden(row, not show)
+            if not show:
+                self.items_table.selectionModel().select(self.items_table.model().index(row, 0),
+                                                        QItemSelectionModel.Deselect | QItemSelectionModel.Rows)
 
             if show:
                 visible_count += 1
                 cost_item = self.items_table.item(row, COL_TOTAL_COST)
                 if cost_item and isinstance(cost_item, NumericTableWidgetItem):
                     total_cost_visible += cost_item._value
+                    currency_cell = self.items_table.item(row, ITEM_COLUMNS.index("Currency"))
+                    value_by_currency[currency_cell.text() if currency_cell else "—"] += cost_item._value
 
                 # Dim an Area cell that just repeats the row above it — the
                 # same text row after row after row is noise, not signal,
@@ -790,20 +959,27 @@ class TrackerPage(QWidget):
 
         total_rows = self.items_table.rowCount()
         filter_active = (
-            bool(search_text) or status_filter != tr("all_statuses")
+            bool(search_text) or status_filter is not None
             or supplier_filter != tr("all_suppliers") or area_filter != tr("all_areas")
             or missing_cost_only or missing_prpo_only
         )
         self.clear_filters_btn.setVisible(filter_active)
+        extra_active = (supplier_filter != tr("all_suppliers") or area_filter != tr("all_areas")
+                        or missing_cost_only or missing_prpo_only)
+        self.advanced_filters_btn.setText(tr_text("More Filters") + (" •" if extra_active else ""))
+        totals = " · ".join(f"{amount:,.2f} {currency}" for currency, amount in sorted(value_by_currency.items())) or "—"
 
         if total_rows == 0:
-            self.items_summary_label.setText("No items")
+            self.items_summary_label.setText(tr_text("No items"))
         elif visible_count == total_rows:
-            self.items_summary_label.setText(f"Showing all {total_rows} items  |  Total cost: {total_cost_visible:,.2f}")
+            self.items_summary_label.setText(tr_text("Showing all {count} items | Total cost: {cost}").format(count=total_rows, cost=totals))
         else:
             self.items_summary_label.setText(
-                f"Showing {visible_count} of {total_rows} items  |  Filtered cost: {total_cost_visible:,.2f}"
+                tr_text("Showing {visible} of {count} items | Filtered cost: {cost}").format(visible=visible_count, count=total_rows, cost=totals)
             )
+        self.items_summary_label.setWordWrap(True)
+        self._update_filter_chips()
+        self._update_selection_ui()
 
     def _clear_filters(self):
         self.search_edit.clear()
@@ -818,13 +994,16 @@ class TrackerPage(QWidget):
 
     def _current_item_id(self):
         row = self.items_table.currentRow()
-        if row < 0:
+        if (row < 0 or self.items_table.isRowHidden(row)
+                or not self.items_table.selectionModel().isRowSelected(row)):
             QMessageBox.information(self, "No item selected", "Select an item first.")
             return None
         name_item = self.items_table.item(row, COL_ITEM_NAME)
         return name_item.data(Qt.UserRole) if name_item else None
 
     def _on_cell_edited(self, cell):
+        if not self._can_edit():
+            return
         """Handles a direct in-table edit of Unit Cost / Requested Qty /
         Delivered Qty (double-click or F2 to edit, matching an Excel-like
         workflow) — everything else stays read-only via Edit Item."""
@@ -848,8 +1027,8 @@ class TrackerPage(QWidget):
             QMessageBox.warning(self, "Invalid value", "Enter a number (e.g. 12.5).")
             self.reload_items(select_item_id=item_id)  # revert the cell back to its real value
             return
-        if value < 0:
-            QMessageBox.warning(self, "Invalid value", "Value can't be negative.")
+        if not math.isfinite(value) or value < 0:
+            QMessageBox.warning(self, "Invalid value", "Enter a finite, non-negative number.")
             self.reload_items(select_item_id=item_id)
             return
 
@@ -881,27 +1060,33 @@ class TrackerPage(QWidget):
         self._refresh_row_after_inline_edit(item_id)
 
     def _add_item(self):
+        if not self._can_edit():
+            return
         if self.project is None:
             return
         suppliers = self.db.get_suppliers()
         dlg = ItemDialog(self, suppliers=suppliers, db=self.db, default_currency=self.project["currency"])
-        if dlg.exec():
+        if dlg.exec() and self._can_edit():
             new_id = self.db.add_item(self.project["id"], **dlg.get_data())
             self._clear_filters()  # a stale filter (status/missing-cost/etc.) could hide the new item
             self.reload_items(select_item_id=new_id)
 
     def _edit_item(self):
+        if not self._can_edit():
+            return
         item_id = self._current_item_id()
         if item_id is None:
             return
         item = self.db.get_item(item_id)
         suppliers = self.db.get_suppliers()
         dlg = ItemDialog(self, item=item, suppliers=suppliers, db=self.db, default_currency=self.project["currency"])
-        if dlg.exec():
+        if dlg.exec() and self._can_edit():
             self.db.update_item(item_id, **dlg.get_data())
             self.reload_items(select_item_id=item_id)
 
     def _duplicate_item(self):
+        if not self._can_edit():
+            return
         item_ids = self._selected_item_ids()
         if not item_ids:
             QMessageBox.information(self, "No item selected", "Select at least one item first.")
@@ -911,6 +1096,8 @@ class TrackerPage(QWidget):
         self.reload_items(select_item_ids=new_ids)
 
     def _bulk_edit(self):
+        if not self._can_edit():
+            return
         item_ids = self._selected_item_ids()
         if not item_ids:
             QMessageBox.information(self, "No items selected",
@@ -922,6 +1109,8 @@ class TrackerPage(QWidget):
             self.reload_items(select_item_ids=item_ids)
 
     def _find_replace(self):
+        if not self._can_edit():
+            return
         item_ids = self._selected_item_ids()
         if not item_ids:
             QMessageBox.information(self, "No items selected",
@@ -933,6 +1122,8 @@ class TrackerPage(QWidget):
             self.reload_items(select_item_ids=item_ids)
 
     def _delete_item(self):
+        if not self._can_edit():
+            return
         # Delete EVERY selected row (the shortcut reference promises
         # "Delete selected item(s)"), not just the row under the cursor.
         item_ids = self._selected_item_ids()
@@ -953,6 +1144,18 @@ class TrackerPage(QWidget):
         self.reload_items()
 
         def _undo():
+            project = self.db.get_project(items[0]["project_id"])
+            if project is not None and project["is_deleted"]:
+                # The project went to the trash after these items were
+                # deleted: tie them to it so they return with the project.
+                if auth.is_manager(self.db):
+                    for it in items:
+                        self.db.restore_item(it["id"])
+                    QMessageBox.information(self, tr("undo"), tr_text(
+                        "The item will come back when its project is restored from the trash."))
+                return
+            if not auth.can_edit_items(self.db, [it["id"] for it in items]):
+                return
             for it in items:
                 self.db.restore_item(it["id"])
             self.reload_items()
@@ -963,6 +1166,8 @@ class TrackerPage(QWidget):
         self.undo_bar.show_message(f"{len(items)} item(s) deleted: {names}.", _undo)
 
     def _move_item(self, direction):
+        if not self._can_edit():
+            return
         item_ids = self._selected_item_ids()
         if not item_ids or self.project is None:
             return
@@ -973,6 +1178,8 @@ class TrackerPage(QWidget):
         self.reload_items(select_item_ids=item_ids)
 
     def _move_to_edge(self, to_top):
+        if not self._can_edit():
+            return
         item_ids = self._selected_item_ids()
         if not item_ids or self.project is None:
             QMessageBox.information(self, "No item selected", "Select at least one item first.")
@@ -981,6 +1188,8 @@ class TrackerPage(QWidget):
         self.reload_items(select_item_ids=item_ids)
 
     def _move_to_position(self):
+        if not self._can_edit():
+            return
         item_ids = self._selected_item_ids()
         if not item_ids or self.project is None:
             QMessageBox.information(self, "No item selected", "Select at least one item first.")
@@ -994,7 +1203,7 @@ class TrackerPage(QWidget):
             f"to row #  (1\u2013{total}):",
             value=current_pos, minValue=1, maxValue=max(total, 1),
         )
-        if not ok:
+        if not ok or not self._can_edit():
             return
         self.db.move_items_to_position(self.project["id"], item_ids, target)
         self.reload_items(select_item_ids=item_ids)
@@ -1004,7 +1213,7 @@ class TrackerPage(QWidget):
         if item_id is None:
             return
         item = self.db.get_item(item_id)
-        dlg = AttachmentsDialog(self, self.db, item_id, item["item_name"])
+        dlg = AttachmentsDialog(self, self.db, item_id, item["item_name"], read_only=not self._can_edit())
         dlg.exec()
         self.reload_items(select_item_id=item_id)  # PR/PO column may have changed
 
@@ -1020,7 +1229,7 @@ class TrackerPage(QWidget):
     def _open_deleted_items(self):
         if self.project is None:
             return
-        dlg = DeletedItemsDialog(self, self.db, self.project["id"], on_change=self.reload_items)
+        dlg = DeletedItemsDialog(self, self.db, self.project["id"], on_change=self.reload_items, read_only=not self._can_edit())
         dlg.exec()
 
     # ---------------------------------------------------------------
@@ -1029,7 +1238,7 @@ class TrackerPage(QWidget):
     def _build_reports_tab(self):
         widget = QWidget()
         layout = QVBoxLayout(widget)
-        layout.addWidget(QLabel("<b>Export the currently selected project as a professional report.</b>"))
+        layout.addWidget(QLabel(tr_text("<b>Export the currently selected project as a professional report.</b>")))
 
         self.excel_btn = QPushButton(tr("export_excel"))
         self.excel_btn.clicked.connect(self._export_excel)
@@ -1041,10 +1250,10 @@ class TrackerPage(QWidget):
 
         layout.addSpacing(10)
         layout.addWidget(QLabel(
-            "<b>Export filtered view</b> \u2014 use the search box / status / supplier filters on the "
-            "Items tab to narrow the list down to what you want, then export exactly that."
+            tr_text("<b>Export filtered view</b> \u2014 use the search box / status / supplier filters on the "
+            "Items tab to narrow the list down to what you want, then export exactly that.")
         ))
-        self.filtered_btn = QPushButton("\U0001F4E5 Export Filtered View to Excel")
+        self.filtered_btn = QPushButton(tr_text("\U0001F4E5 Export Filtered View to Excel"))
         self.filtered_btn.clicked.connect(self._export_filtered_excel)
         layout.addWidget(self.filtered_btn)
 
@@ -1055,25 +1264,29 @@ class TrackerPage(QWidget):
         """Runs export_fn() (a zero-arg callable) on a background thread so
         the UI stays responsive, disabling *button* and showing a busy
         label on it in the meantime instead of freezing with no feedback."""
-        button.setEnabled(False)
+        if self._export_worker is not None and self._export_worker.isRunning():
+            return
+        for export_button in (self.excel_btn, self.pdf_btn, self.filtered_btn):
+            export_button.setEnabled(False)
         button.setText("\u23F3 Exporting\u2026")
 
         worker = _ExportWorker(export_fn)
 
         def _on_ok():
-            button.setEnabled(True)
-            button.setText(original_text)
             QMessageBox.information(self, "Done", success_text)
-            self._export_worker = None
 
         def _on_err(err):
-            button.setEnabled(True)
-            button.setText(original_text)
             QMessageBox.critical(self, "Export failed", err)
+
+        def _on_finished():
+            for export_button in (self.excel_btn, self.pdf_btn, self.filtered_btn):
+                export_button.setEnabled(True)
+            button.setText(original_text)
             self._export_worker = None
 
         worker.finished_ok.connect(_on_ok)
         worker.finished_err.connect(_on_err)
+        worker.finished.connect(_on_finished)
         self._export_worker = worker  # keep a reference so it isn't garbage-collected mid-run
         worker.start()
 
@@ -1085,9 +1298,10 @@ class TrackerPage(QWidget):
         if not path:
             return
         from export.excel_export import export_project_to_excel
+        db, project_id = self.db, self.project["id"]
         self._run_export(
             self.excel_btn, tr("export_excel"),
-            lambda: export_project_to_excel(self.db, self.project["id"], path),
+            lambda: export_project_to_excel(db, project_id, path),
             f"Excel report saved:\n{path}",
         )
 
@@ -1099,9 +1313,10 @@ class TrackerPage(QWidget):
         if not path:
             return
         from export.pdf_export import export_project_to_pdf
+        db, project_id = self.db, self.project["id"]
         self._run_export(
             self.pdf_btn, tr("export_pdf"),
-            lambda: export_project_to_pdf(self.db, self.project["id"], path),
+            lambda: export_project_to_pdf(db, project_id, path),
             f"PDF report saved:\n{path}",
         )
 
@@ -1129,9 +1344,10 @@ class TrackerPage(QWidget):
         if not path:
             return
         from export.excel_export import export_project_to_excel
+        db, project_id = self.db, self.project["id"]
         original_text = "\U0001F4E5 Export Filtered View to Excel"
         self._run_export(
             self.filtered_btn, original_text,
-            lambda: export_project_to_excel(self.db, self.project["id"], path, item_ids=visible_item_ids),
+            lambda: export_project_to_excel(db, project_id, path, item_ids=visible_item_ids),
             f"Filtered Excel report saved ({len(visible_item_ids)} item(s)):\n{path}",
         )

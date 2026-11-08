@@ -15,6 +15,8 @@ fast and within the model's context limits.
 Network calls run in a QThread so the UI never freezes.
 """
 
+from i18n import tr_text
+
 import html
 import json
 import re
@@ -46,6 +48,12 @@ _REPORT_PROMPT = (
 _ACTIVITY_CONTEXT_LIMIT = 40
 # How many turns of prior conversation to resend as context each request.
 _HISTORY_CONTEXT_TURNS = 12
+# Upper bound for the JSON data sent per request (~15-20k tokens). Free
+# models often have small context windows and silently cut longer input,
+# which would make answers look complete while ignoring part of the data.
+_MAX_SNAPSHOT_CHARS = 60_000
+# How many not-yet-delivered items to list per project in summary mode.
+_SUMMARY_OPEN_ITEMS = 40
 
 
 def _is_mostly_arabic(text):
@@ -108,6 +116,47 @@ def _build_context_snapshot(db, project_ids=None):
     return snapshot
 
 
+def _summarize_snapshot(snapshot):
+    """Compact form of the snapshot for when the full item list is too
+    large: per-project status counts plus a bounded list of the items that
+    still need action (anything not delivered yet)."""
+    summary = []
+    for project in snapshot:
+        counts = {}
+        open_items = []
+        for it in project["items"]:
+            counts[it["status"]] = counts.get(it["status"], 0) + 1
+            if it["status"] != "Delivered" and len(open_items) < _SUMMARY_OPEN_ITEMS:
+                open_items.append(it)
+        summary.append({
+            "project": project["project"],
+            "currency": project["currency"],
+            "item_count": len(project["items"]),
+            "status_counts": counts,
+            "open_items_sample": open_items,
+        })
+    return summary
+
+
+def build_ai_data(snapshot, max_chars=_MAX_SNAPSHOT_CHARS):
+    """Returns (json_text, note, truncated) to put in the prompt.
+
+    Full detail when it fits; otherwise a summary, and - if even that is
+    too large - a hard cut. *note* tells the model (and the user) that the
+    data is incomplete, so it never presents a partial answer as complete."""
+    full = json.dumps(snapshot, ensure_ascii=False)
+    if len(full) <= max_chars:
+        return full, "", False
+    summary = json.dumps(_summarize_snapshot(snapshot), ensure_ascii=False)
+    note = ("NOTE: the full item list was too large to send. The data below is a SUMMARY "
+            "(status counts per project and a sample of items not yet delivered). Say so "
+            "when an answer needs item-level detail that is not included.")
+    if len(summary) > max_chars:
+        summary = summary[:max_chars]
+        note += " The summary itself was cut off at the size limit."
+    return summary, note, True
+
+
 def _format_activity_for_ai(rows):
     """Plain-text summary of recent audit_log rows for the system prompt."""
     lines = []
@@ -140,10 +189,10 @@ class _ChatWorker(QThread):
 
 
 class _TestConnWorker(QThread):
-    finished = Signal(dict)
+    result_ready = Signal(dict)
 
     def run(self):
-        self.finished.emit(openrouter_client.test_connection())
+        self.result_ready.emit(openrouter_client.test_connection())
 
 
 class AIPage(QWidget):
@@ -167,26 +216,27 @@ class AIPage(QWidget):
         title.setObjectName("pageTitle")
         title_row.addWidget(title)
         title_row.addStretch()
-        test_conn_btn = QPushButton("\U0001F50C Test AI Connection")
-        test_conn_btn.setToolTip("Send one quick test message to verify OPENROUTER_MODEL works before relying on it")
+        self.settings_btn = QPushButton(tr_text("AI Settings"))
+        self.settings_btn.clicked.connect(self._open_settings)
+        title_row.addWidget(self.settings_btn)
+        test_conn_btn = QPushButton(tr_text("\U0001F50C Test AI Connection"))
+        self.test_conn_btn = test_conn_btn
+        test_conn_btn.setToolTip(tr_text("Send one quick test message to verify OPENROUTER_MODEL works before relying on it"))
         test_conn_btn.clicked.connect(self._test_connection)
         title_row.addWidget(test_conn_btn)
         new_conv_btn = QPushButton(tr("new_conversation"))
+        self.new_conv_btn = new_conv_btn
         new_conv_btn.clicked.connect(self._new_conversation)
         title_row.addWidget(new_conv_btn)
         layout.addLayout(title_row)
 
-        if not openrouter_client.is_configured():
-            warn = QLabel(
-                "OpenRouter is not configured yet. Create a .env file next to main.py "
-                "(copy .env.example) and set OPENROUTER_API_KEY. This uses OpenRouter's "
-                "free-tier models, so it stays free for personal use."
-            )
-            warn.setWordWrap(True)
-            layout.addWidget(warn)
+        self.config_hint = QLabel(tr_text("Open AI Settings to configure your key, then use Test AI Connection."))
+        self.config_hint.setWordWrap(True)
+        self.config_hint.setVisible(not openrouter_client.is_configured())
+        layout.addWidget(self.config_hint)
 
         scope_row = QHBoxLayout()
-        scope_row.addWidget(QLabel("Scope:"))
+        scope_row.addWidget(QLabel(tr_text("Scope:")))
         self.scope_combo = QComboBox()
         self._populate_scope_combo()
         self.scope_combo.currentIndexChanged.connect(self._on_scope_changed)
@@ -195,9 +245,9 @@ class AIPage(QWidget):
         layout.addLayout(scope_row)
 
         memory_hint = QLabel(
-            "Conversations are saved locally per scope (a project, a Main Project group, or "
+            tr_text("Conversations are saved locally per scope (a project, a Main Project group, or "
             "\u201cAll projects\u201d) and reloaded automatically — the assistant also sees a short "
-            "summary of recent changes for this scope."
+            "summary of recent changes for this scope.")
         )
         memory_hint.setObjectName("breadcrumb")
         memory_hint.setWordWrap(True)
@@ -214,9 +264,9 @@ class AIPage(QWidget):
 
         input_row = QHBoxLayout()
         self.input_edit = QLineEdit()
-        self.input_edit.setPlaceholderText("Ask about your projects, e.g. 'what's still pending on Site A?'")
+        self.input_edit.setPlaceholderText(tr_text("Ask about your projects, e.g. 'what's still pending on Site A?'"))
         self.input_edit.returnPressed.connect(self._send)
-        self.send_btn = QPushButton("Send")
+        self.send_btn = QPushButton(tr_text("Send"))
         self.send_btn.setObjectName("primaryButton")
         self.send_btn.clicked.connect(self._send)
         input_row.addWidget(self.input_edit, 1)
@@ -225,11 +275,11 @@ class AIPage(QWidget):
 
         # ---- Report tools ----
         report_row = QHBoxLayout()
-        self.report_btn = QPushButton("\U0001F4C4 " + tr("quick_report"))
-        self.report_btn.setToolTip("Ask the AI for a short plain-text status report for the selected scope")
+        self.report_btn = QPushButton(tr("quick_report"))
+        self.report_btn.setToolTip(tr_text("Ask the AI for a short plain-text status report for the selected scope"))
         self.report_btn.clicked.connect(self._generate_report)
-        self.save_txt_btn = QPushButton("\U0001F4BE " + tr("save_as_txt"))
-        self.save_txt_btn.setToolTip("Save the last AI reply above as a .txt file")
+        self.save_txt_btn = QPushButton(tr("save_as_txt"))
+        self.save_txt_btn.setToolTip(tr_text("Save the last AI reply above as a .txt file"))
         self.save_txt_btn.clicked.connect(self._save_last_reply)
         self.save_txt_btn.setEnabled(False)
         report_row.addWidget(self.report_btn)
@@ -247,9 +297,9 @@ class AIPage(QWidget):
     # Scope handling / persisted memory
     # ------------------------------------------------------------------ #
     def _populate_scope_combo(self):
-        self.scope_combo.addItem("All projects", ("all", None))
+        self.scope_combo.addItem(tr_text("All projects"), ("all", None))
         for g in self.db.get_project_groups():
-            self.scope_combo.addItem(f"\U0001F4C1 {g['name']} (Group)", ("group", g["id"]))
+            self.scope_combo.addItem(f"{g['name']} ({tr_text('Group')})", ("group", g["id"]))
         for p in self.db.get_projects():
             self.scope_combo.addItem(p["name"], ("project", p["id"]))
 
@@ -260,15 +310,18 @@ class AIPage(QWidget):
         self.scope_combo.blockSignals(True)
         self.scope_combo.clear()
         self._populate_scope_combo()
-        idx = self.scope_combo.findData(current)
+        idx = next((i for i in range(self.scope_combo.count())
+                    if self.scope_combo.itemData(i) == current), 0)
         self.scope_combo.setCurrentIndex(max(idx, 0))
         self.scope_combo.blockSignals(False)
+        if self.scope_combo.currentData() != current:
+            self._load_scope_history(*self._scope_db_ids())
 
     def _scope_project_ids(self):
         """None = every project; otherwise a list of project ids this
         scope covers (a single project, or every project in the
         selected group)."""
-        kind, ident = self.scope_combo.currentData()
+        kind, ident = self.scope_combo.currentData() or ("all", None)
         if kind == "project":
             return [ident]
         if kind == "group":
@@ -279,7 +332,7 @@ class AIPage(QWidget):
         """(scope_project_id, scope_group_id) pair matching the chat
         history methods' signature — exactly one is set, or neither for
         the "All projects" scope."""
-        kind, ident = self.scope_combo.currentData()
+        kind, ident = self.scope_combo.currentData() or ("all", None)
         if kind == "project":
             return ident, None
         if kind == "group":
@@ -333,7 +386,7 @@ class AIPage(QWidget):
         direction = "rtl" if _is_mostly_arabic(text) else "ltr"
         align = "right" if direction == "rtl" else "left"
         self.chat_log.append(
-            f'<div dir="{direction}" style="text-align:{align};"><b>{who}:</b> {body}</div>'
+            f'<div dir="{direction}" style="text-align:{align};"><b>{html.escape(tr_text(who))}:</b> {body}</div>'
         )
         if persist and role is not None:
             scope_project_id, scope_group_id = self._scope_db_ids()
@@ -356,8 +409,12 @@ class AIPage(QWidget):
         self.thinking_label.setText("\U0001F914 AI is thinking" + "." * self._thinking_dots)
 
     def _send(self):
+        if self._busy():
+            return
         question = self.input_edit.text().strip()
         if not question:
+            return
+        if not self._ensure_configured():
             return
         self.input_edit.clear()
         self._ask(question, shown_as="You")
@@ -365,24 +422,44 @@ class AIPage(QWidget):
     def _generate_report(self):
         """Ask the AI for a short plain-text status report, then offer to
         save it as a .txt file as soon as it arrives."""
+        if self._busy():
+            return
+        if not self._ensure_configured():
+            return
         scope_name = self.scope_combo.currentText()
         self._append("You", f"[{tr('quick_report')}] {scope_name}", persist=True, role="user")
         self._ask(_REPORT_PROMPT, shown_as=None, is_report=True, already_shown=True)
 
     def _ask(self, question, shown_as="You", is_report=False, already_shown=False):
+        if self._busy():
+            return
         if not openrouter_client.is_configured():
-            self._append("System", "AI is not configured. Add OPENROUTER_API_KEY to your .env file.", persist=False)
+            self._append("System", tr_text("Open AI Settings to configure your key, then use Test AI Connection."), persist=False)
+            return
+        if not self._confirm_data_sharing():
             return
 
         if shown_as and not already_shown:
             self._append(shown_as, question, persist=True, role="user")
+        self._request_pending = True
+        self.input_edit.setEnabled(False)
         self.send_btn.setEnabled(False)
         self.report_btn.setEnabled(False)
+        self.scope_combo.setEnabled(False)
+        self.new_conv_btn.setEnabled(False)
+        self.test_conn_btn.setEnabled(False)
+        self.settings_btn.setEnabled(False)
+        self._request_scope = self._scope_db_ids()
 
         project_ids = self._scope_project_ids()
         self._last_reply_project_name = self.scope_combo.currentText()
 
         snapshot = _build_context_snapshot(self.db, project_ids)
+        data_text, data_note, truncated = build_ai_data(snapshot)
+        if truncated:
+            self._append("System", tr_text(
+                "This scope is large, so a summary was sent instead of every item. "
+                "Choose a single project or group for item-level answers."), persist=False)
         activity_rows = self._activity_for_scope(project_ids, limit=_ACTIVITY_CONTEXT_LIMIT)
         activity_text = _format_activity_for_ai(activity_rows)
 
@@ -390,7 +467,7 @@ class AIPage(QWidget):
             "You are a helpful assistant for a construction materials/procurement tracker. "
             "Answer using ONLY the data provided below; if something isn't in the data, say so. "
             "Be concise and use the same language the user asks in (Arabic or English).\n\n"
-            f"CURRENT DATA:\n{json.dumps(snapshot, ensure_ascii=False)}\n\n"
+            f"{data_note}\nCURRENT DATA:\n{data_text}\n\n"
             f"RECENT ACTIVITY (most recent first, may be partial):\n{activity_text}"
         )
         messages = [{"role": "system", "content": system_prompt}]
@@ -407,8 +484,21 @@ class AIPage(QWidget):
 
     def _on_reply(self, text, is_report=False):
         self._stop_thinking()
-        self._append("AI", text, persist=True, role="assistant")
-        self._history.append({"role": "assistant", "content": text})
+        self._request_pending = False
+        self.test_conn_btn.setEnabled(True)
+        self.settings_btn.setEnabled(True)
+        self.input_edit.setEnabled(True)
+        project_id, group_id = self._request_scope
+        self.db.save_chat_message(project_id, "assistant", text, scope_group_id=group_id)
+        if self._scope_db_ids() == self._request_scope:
+            self._append("AI", text, persist=False)
+            self._history.append({"role": "assistant", "content": text})
+        self.scope_combo.setEnabled(True)
+        self.new_conv_btn.setEnabled(True)
+        if self._scope_db_ids() != self._request_scope:
+            self.send_btn.setEnabled(True)
+            self.report_btn.setEnabled(openrouter_client.is_configured())
+            return
         self._last_reply_text = text
         self.send_btn.setEnabled(True)
         self.report_btn.setEnabled(openrouter_client.is_configured())
@@ -418,32 +508,46 @@ class AIPage(QWidget):
 
     def _on_error(self, err):
         self._stop_thinking()
+        self._request_pending = False
+        self.test_conn_btn.setEnabled(True)
+        self.settings_btn.setEnabled(True)
+        self.input_edit.setEnabled(True)
+        self.scope_combo.setEnabled(True)
+        self.new_conv_btn.setEnabled(True)
         self._append("System", f"Error: {err}", persist=False)
         self.send_btn.setEnabled(True)
         self.report_btn.setEnabled(openrouter_client.is_configured())
 
+    def _busy(self):
+        return (getattr(self, "_request_pending", False)
+                or getattr(self, "_test_pending", False)
+                or any(isinstance(worker, QThread) and worker.isRunning()
+                       for worker in (self._worker, getattr(self, "_test_worker", None))))
+
     def _test_connection(self):
-        if not openrouter_client.is_configured():
-            QMessageBox.information(
-                self, "Not configured",
-                "OPENROUTER_API_KEY is not set — add it to your .env file first (see .env.example)."
-            )
+        if self._busy():
+            return
+        if not self._ensure_configured():
             return
         self._append("System", f"Testing connection to model: {openrouter_client.get_model()}\u2026", persist=False)
         self._start_thinking()
+        self._test_pending = True
+        self.test_conn_btn.setEnabled(False)
+        self.settings_btn.setEnabled(False)
+        self.send_btn.setEnabled(False)
+        self.report_btn.setEnabled(False)
         self._test_worker = _TestConnWorker()
-        self._test_worker.finished.connect(self._on_test_connection_result)
+        self._test_worker.result_ready.connect(self._on_test_connection_result)
         self._test_worker.start()
 
     def _on_test_connection_result(self, result):
+        self._test_pending = False
+        self.test_conn_btn.setEnabled(True)
+        self.settings_btn.setEnabled(True)
+        self.send_btn.setEnabled(True)
+        self.report_btn.setEnabled(openrouter_client.is_configured())
         self._stop_thinking()
-        env_note = (
-            f"(.env found at: {result['env_path']})" if result["env_exists"]
-            else f"\u26A0 (.env NOT found at: {result['env_path']} \u2014 this is almost always the real "
-                 f"problem if the model looks wrong: check the file really exists there with exactly "
-                 f"that name, e.g. via 'dir .env*' in Command Prompt \u2014 Windows sometimes silently "
-                 f"saves it as '.env.txt')"
-        )
+        env_note = tr_text("Use AI Settings to change your key or model.")
         if result["ok"]:
             self._append(
                 "System",
@@ -457,6 +561,42 @@ class AIPage(QWidget):
                 f"\u274C Connection failed (model: {result['model']}): {result['error']}\n{env_note}",
                 persist=False,
             )
+
+    def _open_settings(self):
+        if self._busy():
+            return
+        from ui.ai_settings_dialog import AISettingsDialog
+        AISettingsDialog(self).exec()
+        configured = openrouter_client.is_configured()
+        self.config_hint.setVisible(not configured)
+        self.report_btn.setEnabled(configured)
+
+    def _confirm_data_sharing(self):
+        """Asks once per Windows account before project data first leaves
+        the computer. Free OpenRouter models may log or train on prompts."""
+        from PySide6.QtCore import QSettings
+        settings = QSettings("ProjectTracker", "MainWindow")
+        if settings.value("ai_data_sharing_ok", False, type=bool):
+            return True
+        answer = QMessageBox.question(
+            self, tr_text("Send project data?"),
+            tr_text(
+                "To answer, the item names, suppliers, quantities and statuses of the chosen scope "
+                "are sent to OpenRouter and the selected model. Free models may store or use the "
+                "data they receive. Continue?"),
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+        )
+        if answer == QMessageBox.Yes:
+            settings.setValue("ai_data_sharing_ok", True)
+            return True
+        return False
+
+    def _ensure_configured(self):
+        if not openrouter_client.is_configured():
+            self._open_settings()
+            # Let the user press Send/Test after reviewing their settings.
+            return False
+        return True
 
     def _save_last_reply(self):
         if not self._last_reply_text:

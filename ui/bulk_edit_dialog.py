@@ -7,6 +7,9 @@ partially filling in the dialog never accidentally blanks out fields you
 didn't mean to touch.
 """
 
+from i18n import tr_text
+import auth
+
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QFormLayout, QLabel, QPushButton,
     QComboBox, QLineEdit, QCheckBox, QMessageBox, QTextEdit
@@ -21,15 +24,13 @@ class BulkEditDialog(QDialog):
         self.db = db
         self.item_ids = list(item_ids)
 
-        self.setWindowTitle("Bulk Edit")
+        self.setWindowTitle(tr_text("Bulk Edit"))
         self.setMinimumWidth(440)
 
         layout = QVBoxLayout(self)
-        layout.addWidget(QLabel(
-            f"<b>Editing {len(self.item_ids)} item(s)</b><br>"
-            f"Only checked fields below will be changed \u2014 leave a field "
-            f"unchecked to keep each item's existing value."
-        ))
+        hint = QLabel(tr_text("Editing {count} items. Only checked fields will change.").format(count=len(self.item_ids)))
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
 
         form = QFormLayout()
 
@@ -45,7 +46,7 @@ class BulkEditDialog(QDialog):
             lambda state: self.supplier_combo.setEnabled(bool(state)))
         supplier_row.addWidget(self.supplier_check)
         supplier_row.addWidget(self.supplier_combo, 1)
-        form.addRow("Supplier", supplier_row)
+        form.addRow(tr_text("Supplier"), supplier_row)
 
         # -- Unit --
         unit_row = QHBoxLayout()
@@ -55,7 +56,7 @@ class BulkEditDialog(QDialog):
         self.unit_check.stateChanged.connect(lambda state: self.unit_edit.setEnabled(bool(state)))
         unit_row.addWidget(self.unit_check)
         unit_row.addWidget(self.unit_edit, 1)
-        form.addRow("Unit", unit_row)
+        form.addRow(tr_text("Unit"), unit_row)
 
         # -- Currency --
         currency_row = QHBoxLayout()
@@ -67,7 +68,7 @@ class BulkEditDialog(QDialog):
         self.currency_check.stateChanged.connect(lambda state: self.currency_combo.setEnabled(bool(state)))
         currency_row.addWidget(self.currency_check)
         currency_row.addWidget(self.currency_combo, 1)
-        form.addRow("Currency", currency_row)
+        form.addRow(tr_text("Currency"), currency_row)
 
         # -- Pump Station / Area --
         area_row = QHBoxLayout()
@@ -77,7 +78,7 @@ class BulkEditDialog(QDialog):
         self.area_check.stateChanged.connect(lambda state: self.area_edit.setEnabled(bool(state)))
         area_row.addWidget(self.area_check)
         area_row.addWidget(self.area_edit, 1)
-        form.addRow("Pump Station / Area", area_row)
+        form.addRow(tr_text("Pump Station / Area"), area_row)
 
         # -- Remarks -- (replaces each selected item's Remarks with this exact
         # text; for tweaking existing wording instead of replacing it wholesale,
@@ -90,15 +91,15 @@ class BulkEditDialog(QDialog):
         self.remarks_check.stateChanged.connect(lambda state: self.remarks_edit.setEnabled(bool(state)))
         remarks_row.addWidget(self.remarks_check)
         remarks_row.addWidget(self.remarks_edit, 1)
-        form.addRow("Remarks", remarks_row)
+        form.addRow(tr_text("Remarks"), remarks_row)
 
         layout.addLayout(form)
 
         btn_row = QHBoxLayout()
         btn_row.addStretch()
-        cancel_btn = QPushButton("Cancel")
+        cancel_btn = QPushButton(tr_text("Cancel"))
         cancel_btn.clicked.connect(self.reject)
-        apply_btn = QPushButton(f"Apply to {len(self.item_ids)} item(s)")
+        apply_btn = QPushButton(tr_text("Apply to {count} items").format(count=len(self.item_ids)))
         apply_btn.setObjectName("primaryButton")
         apply_btn.clicked.connect(self._apply)
         btn_row.addWidget(cancel_btn)
@@ -106,6 +107,8 @@ class BulkEditDialog(QDialog):
         layout.addLayout(btn_row)
 
     def _apply(self):
+        if not auth.can_edit_items(self.db, self.item_ids):
+            return
         fields = {}
         if self.supplier_check.isChecked():
             fields["supplier_id"] = self.supplier_combo.currentData()

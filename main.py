@@ -19,9 +19,9 @@ from datetime import datetime
 
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QPushButton, QLabel, QMessageBox, QFileDialog, QStackedWidget, QFrame
+    QPushButton, QLabel, QMessageBox, QFileDialog, QStackedWidget, QFrame, QTableWidget
 )
-from PySide6.QtCore import Qt, QSettings, QSize
+from PySide6.QtCore import Qt, QSettings, QSize, QThread, QTimer
 from PySide6.QtGui import QIcon, QShortcut, QKeySequence
 
 import config
@@ -30,7 +30,7 @@ from constants import APP_VERSION
 from database import Database
 import backup
 from ui.styles import get_stylesheet, DARK_TOKENS, LIGHT_TOKENS
-from ui.icons import make_icon
+from ui.icons import make_icon, apply_standard_icons, StandardIconFilter
 from ui.command_palette import (
     CommandPalette, ACTION_ADD_ITEM, ACTION_EXPORT_PDF, ACTION_SEARCH_ALL,
     ACTION_TOGGLE_THEME, ACTION_TOGGLE_LANGUAGE,
@@ -48,7 +48,7 @@ from ui.global_search_dialog import GlobalSearchDialog
 from ui.variance_report_dialog import VarianceReportDialog
 from ui.cost_change_log_dialog import CostChangeLogDialog
 import i18n
-from i18n import tr
+from i18n import tr, tr_text
 
 def _log_dir():
     """Where the app writes its log.
@@ -92,6 +92,17 @@ def _install_excepthook():
     In a windowed build the user otherwise only sees PyInstaller's traceback
     dialog, and nothing is kept."""
     def _hook(exc_type, exc_value, exc_tb):
+        from database import is_database_busy_error
+        if is_database_busy_error(exc_value):
+            # Another user/computer kept the shared database busy for too
+            # long. Nothing was saved by the failed action (SQLite rolled it
+            # back); say so plainly instead of showing a traceback.
+            logging.getLogger("project_tracker").warning("Database busy: %s", exc_value)
+            if QApplication.instance() is not None:
+                QMessageBox.warning(None, tr_text("Database busy"), tr_text(
+                    "The database is being used by another user or computer right now, "
+                    "so this change was NOT saved. Wait a moment and try again."))
+            return
         logging.getLogger("project_tracker").critical(
             "Unhandled exception", exc_info=(exc_type, exc_value, exc_tb)
         )
@@ -145,6 +156,12 @@ class MainWindow(QMainWindow):
         self.db = db
         self.data_dir = data_dir
         self._settings = QSettings("ProjectTracker", "MainWindow")
+        app = QApplication.instance()
+        from ui.fonts import install_cairo
+        install_cairo(app)
+        if not hasattr(app, "_standard_icon_filter"):
+            app._standard_icon_filter = StandardIconFilter(app)
+            app.installEventFilter(app._standard_icon_filter)
 
         self.current_theme = self._settings.value("theme", "dark")
         # Collapsed by default: a hamburger menu that the user can open,
@@ -166,13 +183,14 @@ class MainWindow(QMainWindow):
         self._apply_theme(self.current_theme)
         self._restore_window_state()
         self._reopen_last_project()
+        self._start_backup_timer()
 
     def _reopen_last_project(self):
         last_id = config.load_last_project_id()
         if last_id is None:
             return
         project = self.db.get_project(last_id)
-        if project is not None:  # None if deleted, or a different/empty data folder now
+        if project is not None and not project["is_deleted"]:
             self._open_project(last_id)
 
     # ------------------------------------------------------------------ #
@@ -196,8 +214,11 @@ class MainWindow(QMainWindow):
         self.stack = QStackedWidget()
         self.projects_page = ProjectsPage(self.db, self.undo_bar)
         self.projects_page.project_opened.connect(self._open_project)
+        self.projects_page.items_requested.connect(self._open_project_items)
+        self.projects_page.item_opened.connect(self._open_project_and_item)
         self.tracker_page = TrackerPage(self.db, self.undo_bar)
         self.tracker_page.back_requested.connect(lambda: self._navigate(0, "projects"))
+        self.tracker_page.project_requested.connect(self._switch_open_project)
         self.suppliers_page = SuppliersPage(self.db, self.undo_bar)
         self.ai_page = AIPage(self.db)
         self.dashboard_page = DashboardPage(self.db)
@@ -209,6 +230,7 @@ class MainWindow(QMainWindow):
         self.stack.addWidget(self.ai_page)           # 3
         self.stack.addWidget(self.dashboard_page)    # 4
         self.schedule_page = SchedulePage(self.db)
+        self.schedule_page.project_requested.connect(self._switch_open_project)
         self.stack.addWidget(self.schedule_page)     # 5
         # Sidebar is added FIRST so Qt puts it on the leading edge in both
         # directions: right under Arabic (RTL), left under English (LTR).
@@ -312,6 +334,11 @@ class MainWindow(QMainWindow):
         self.lang_btn.clicked.connect(self._toggle_language)
         layout.addWidget(self.lang_btn)
 
+        self.signout_btn = QPushButton(tr("sign_out"))
+        self._prepare_nav_button(self.signout_btn, "logout")
+        self.signout_btn.clicked.connect(self._sign_out)
+        layout.addWidget(self.signout_btn)
+
         self._apply_sidebar_state()
         return side
 
@@ -347,7 +374,8 @@ class MainWindow(QMainWindow):
         side = getattr(self, "sidebar", None)
         if side is None:
             return
-        side.setFixedWidth(64 if collapsed else 230)
+        scale = self._settings.value("interface_scale", 1.0, type=float)
+        side.setFixedWidth(64 if collapsed else round(230 * scale))
         layout = getattr(self, "_sidebar_layout", None)
         if layout is not None:
             layout.setContentsMargins(8 if collapsed else 12, 14, 8 if collapsed else 12, 14)
@@ -360,7 +388,7 @@ class MainWindow(QMainWindow):
             self.hamburger_btn.setToolTip(tr("menu_toggle_tip"))
 
         buttons = list(getattr(self, "nav_buttons", {}).values())
-        for attr in ("search_btn", "palette_btn", "theme_btn", "lang_btn"):
+        for attr in ("search_btn", "palette_btn", "theme_btn", "lang_btn", "signout_btn"):
             btn = getattr(self, attr, None)
             if btn is not None:
                 buttons.append(btn)
@@ -373,6 +401,7 @@ class MainWindow(QMainWindow):
                 btn.setToolTip(btn.property("baseTip") or "")
 
         self._refresh_sidebar_icons()
+        apply_standard_icons(self)
 
     @staticmethod
     def _section_label(text):
@@ -388,6 +417,11 @@ class MainWindow(QMainWindow):
         self.undo_bar.setStyleSheet(self.undo_bar.styleSheet())
 
     def _navigate(self, index, key):
+        if key in ("items", "schedule") and self.tracker_page.project:
+            project = self.db.get_project(self.tracker_page.project["id"])
+            if project is None or project["is_deleted"]:
+                self._navigate(0, "projects")
+                return
         self.stack.setCurrentIndex(index)
         for k, btn in self.nav_buttons.items():
             btn.setChecked(k == key)
@@ -408,6 +442,9 @@ class MainWindow(QMainWindow):
             self.schedule_page.reload()
 
     def _open_project(self, project_id):
+        project = self.db.get_project(project_id)
+        if project is None or project["is_deleted"]:
+            return
         self.tracker_page.open_project(project_id)
         self.schedule_page.open_project(project_id)
         self.stack.setCurrentIndex(1)
@@ -416,10 +453,29 @@ class MainWindow(QMainWindow):
         self.nav_buttons["items"].setChecked(True)
         config.save_last_project_id(project_id)
 
+    def _switch_open_project(self, project_id):
+        page = self.stack.currentIndex()
+        self._open_project(project_id)
+        if page == 5:
+            self._navigate(5, "schedule")
+
+    def _open_project_items(self, project_id, status):
+        project = self.db.get_project(project_id)
+        if project is None or project["is_deleted"]:
+            return
+        self._open_project(project_id)
+        self.tracker_page.tabs.setCurrentIndex(0)
+        self.tracker_page._clear_filters()
+        combo = self.tracker_page.status_filter
+        combo.setCurrentIndex(max(0, combo.findData(status or None)))
+
     def _open_project_and_item(self, project_id, item_id):
         """Same as _open_project, but also selects/scrolls to a specific
         item — used by the Dashboard's stale-items list and by
         Search All Projects."""
+        project = self.db.get_project(project_id)
+        if project is None or project["is_deleted"]:
+            return
         self.tracker_page.open_project(project_id, select_item_id=item_id)
         self.schedule_page.open_project(project_id)
         self.stack.setCurrentIndex(1)
@@ -469,7 +525,7 @@ class MainWindow(QMainWindow):
             self._apply_button_icon(btn)
         # The hamburger lives in the same rail, so it needs its icon drawn
         # too - without this it was an invisible (but working) button.
-        for attr in ("hamburger_btn", "search_btn", "palette_btn", "theme_btn", "lang_btn"):
+        for attr in ("hamburger_btn", "search_btn", "palette_btn", "theme_btn", "lang_btn", "signout_btn"):
             btn = getattr(self, attr, None)
             if btn is not None:
                 self._apply_button_icon(btn)
@@ -487,6 +543,10 @@ class MainWindow(QMainWindow):
 
     def _run_palette_action(self, action_id):
         if action_id == ACTION_ADD_ITEM:
+            import auth
+            project = getattr(self.tracker_page, "project", None)
+            if project is None or not auth.can_edit_project(self.db, project["id"]):
+                return
             self.tracker_page.add_item_from_palette()
         elif action_id == ACTION_EXPORT_PDF:
             self.tracker_page.export_pdf_from_palette()
@@ -511,7 +571,16 @@ class MainWindow(QMainWindow):
         # stylesheet, so the theme has to be published where they are built.
         constants.set_theme(theme)
         rtl = i18n.get_language() == "ar"
-        QApplication.instance().setStyleSheet(get_stylesheet(theme, rtl=rtl))
+        scale = self._settings.value("interface_scale", 1.0, type=float)
+        QApplication.instance().setStyleSheet(get_stylesheet(theme, rtl=rtl, scale=scale))
+        for table in self.findChildren(QTableWidget):
+            table.verticalHeader().setDefaultSectionSize(round(30 * scale))
+            previous_scale = table.property("interfaceScale") or 1.0
+            if abs(previous_scale - scale) > 0.01:
+                for col in range(table.columnCount()):
+                    table.setColumnWidth(col, round(table.columnWidth(col) * scale / previous_scale))
+                table.resizeRowsToContents()
+            table.setProperty("interfaceScale", scale)
         if hasattr(self, "theme_btn"):
             self._set_sidebar_button_text(
                 self.theme_btn, tr("light_mode") if theme == "dark" else tr("dark_mode"))
@@ -523,21 +592,139 @@ class MainWindow(QMainWindow):
         projects = getattr(self, "projects_page", None)
         if projects is not None:
             projects.on_theme_changed()
+        self._apply_sidebar_state()
         self._refresh_sidebar_icons()
+        apply_standard_icons(self)
 
 
 
     def _toggle_language(self):
+        if getattr(self, "_language_change_pending", False):
+            return
+        workers = self._running_workers()
+        if workers:
+            # Rebuilding widgets while they own live QThreads can destroy a
+            # running worker. Keep references and apply the change when idle.
+            self._language_change_pending = True
+            self._language_wait_workers = workers
+            self.lang_btn.setEnabled(False)
+            self.statusBar().showMessage(tr("language_wait"))
+            for worker in workers:
+                worker.finished.connect(self._retry_language_change)
+            return
+        state = self._capture_ui_state()
         new_lang = "en" if i18n.get_language() == "ar" else "ar"
         i18n.set_language(new_lang)
         self._settings.setValue("language", new_lang)
         QApplication.instance().setLayoutDirection(Qt.RightToLeft if new_lang == "ar" else Qt.LeftToRight)
         # Simplest reliable way to re-translate every screen: rebuild the UI.
-        current_project = self.tracker_page.project
         self._build_central_widget()
         self._apply_theme(self.current_theme)
-        if current_project:
-            self._open_project(current_project["id"])
+        self._restore_ui_state(state)
+
+    def _running_workers(self):
+        owners = [self] + self.findChildren(QWidget)
+        workers = list(ExportWorker.active_workers())
+        for owner in owners:
+            for value in vars(owner).values():
+                if isinstance(value, QThread) and value.isRunning() and value not in workers:
+                    workers.append(value)
+        return workers
+
+    def _retry_language_change(self, *_):
+        QTimer.singleShot(0, self._complete_language_change)
+
+    def _complete_language_change(self):
+        if not getattr(self, "_language_change_pending", False):
+            return
+        if self._running_workers() or any(worker.isRunning() for worker in self._language_wait_workers):
+            QTimer.singleShot(100, self._complete_language_change)
+            return
+        self._language_change_pending = False
+        self._language_wait_workers = []
+        self.statusBar().clearMessage()
+        self._toggle_language()
+
+    def _sign_out(self):
+        """Sign the current user out and let someone else sign in."""
+        import auth
+
+        if getattr(self, "_language_change_pending", False) or self._running_workers():
+            QMessageBox.information(self, tr("sign_out"), tr("sign_out_wait"))
+            return
+        answer = QMessageBox.question(
+            self, tr("sign_out"), tr("sign_out_question"),
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+        )
+        if answer != QMessageBox.Yes:
+            return
+        state = self._capture_ui_state()
+        auth.logout()
+        from PySide6.QtWidgets import QDialog
+        from ui.login_dialog import LoginDialog
+        dialog = LoginDialog(self.db, parent=self, first_run=False)
+        if dialog.exec() != QDialog.Accepted:
+            self.close()
+            return
+        # The next user may have different rights: rebuild every screen.
+        self._build_central_widget()
+        self._apply_theme(self.current_theme)
+        self._restore_ui_state(state)
+
+    def _capture_ui_state(self):
+        tracker = self.tracker_page
+        return {
+            "page": self.stack.currentIndex(),
+            "project_id": tracker.project["id"] if tracker.project else None,
+            "tab": tracker.tabs.currentIndex(),
+            "item_ids": tracker._selected_item_ids(),
+            "item_search": tracker.search_edit.text(),
+            "status": tracker.status_filter.currentData(),
+            "supplier": tracker.supplier_filter.currentText() if tracker.supplier_filter.currentIndex() > 0 else None,
+            "area": tracker.area_filter.currentText() if tracker.area_filter.currentIndex() > 0 else None,
+            "missing_cost": tracker.missing_cost_check.isChecked(),
+            "missing_prpo": tracker.missing_prpo_check.isChecked(),
+            "advanced": tracker.advanced_filters_btn.isChecked(),
+            "project_search": self.projects_page.search_edit.text(),
+            "project_scope": self.projects_page.selected_scope(),
+            "expanded_groups": [self.projects_page.project_tree.topLevelItem(i).data(0, Qt.UserRole)
+                                for i in range(self.projects_page.project_tree.topLevelItemCount())
+                                if self.projects_page.project_tree.topLevelItem(i).isExpanded()],
+            "supplier_search": self.suppliers_page.search_edit.text(),
+            "ai_scope": self.ai_page.scope_combo.currentData(),
+            "ai_draft": self.ai_page.input_edit.text(),
+        }
+
+    def _restore_ui_state(self, state):
+        tracker = self.tracker_page
+        project_id = state["project_id"]
+        project = self.db.get_project(project_id) if project_id is not None else None
+        if project and not project["is_deleted"]:
+            # Restore project context without navigating to the BOQ page.
+            tracker.open_project(project_id)
+            self.schedule_page.open_project(project_id)
+        tracker.tabs.setCurrentIndex(state["tab"])
+        tracker.search_edit.setText(state["item_search"])
+        tracker.status_filter.setCurrentIndex(max(0, tracker.status_filter.findData(state["status"])))
+        for combo, key in ((tracker.supplier_filter, "supplier"), (tracker.area_filter, "area")):
+            if state[key] is not None:
+                combo.setCurrentIndex(max(0, combo.findText(state[key])))
+        tracker.missing_cost_check.setChecked(state["missing_cost"])
+        tracker.missing_prpo_check.setChecked(state["missing_prpo"])
+        tracker.advanced_filters_btn.setChecked(state["advanced"])
+        tracker._select_rows_by_item_ids(state["item_ids"])
+        scope_index = next((i for i in range(self.ai_page.scope_combo.count())
+                            if self.ai_page.scope_combo.itemData(i) == state["ai_scope"]), 0)
+        self.ai_page.scope_combo.setCurrentIndex(scope_index)
+        self.ai_page.input_edit.setText(state["ai_draft"])
+        keys = ("projects", "items", "suppliers", "ai", "dashboard", "schedule")
+        self._navigate(state["page"], keys[state["page"]])
+        self.projects_page.search_edit.setText(state["project_search"])
+        self.projects_page.restore_scope(state["project_scope"])
+        for index in range(self.projects_page.project_tree.topLevelItemCount()):
+            node = self.projects_page.project_tree.topLevelItem(index)
+            node.setExpanded(node.data(0, Qt.UserRole) in state.get("expanded_groups", []))
+        self.suppliers_page.search_edit.setText(state["supplier_search"])
 
     # ---------------------------------------------------------------
     # Window state persistence
@@ -548,8 +735,22 @@ class MainWindow(QMainWindow):
             self.restoreGeometry(geometry)
 
     def closeEvent(self, event):
+        if self._running_workers():
+            event.ignore()
+            self.statusBar().showMessage(tr_text("Finishing background operations before closing…"))
+            if not getattr(self, "_close_pending", False):
+                self._close_pending = True
+                QTimer.singleShot(100, self._retry_close)
+            return
         self._settings.setValue("geometry", self.saveGeometry())
         super().closeEvent(event)
+
+    def _retry_close(self):
+        if self._running_workers():
+            QTimer.singleShot(100, self._retry_close)
+        elif getattr(self, "_close_pending", False):
+            self._close_pending = False
+            self.close()
 
     # ---------------------------------------------------------------
     # Menu bar / status bar / data folder management
@@ -580,7 +781,12 @@ class MainWindow(QMainWindow):
 
         restore_action = file_menu.addAction(tr("menu_restore_backup"))
         restore_action.triggered.connect(self._restore_backup)
+        extra_backup_action = file_menu.addAction(tr_text("Second backup folder…"))
+        extra_backup_action.triggered.connect(self._choose_extra_backup_folder)
 
+        file_menu.addSeparator()
+        signout_action = file_menu.addAction(tr("sign_out"))
+        signout_action.triggered.connect(self._sign_out)
         file_menu.addSeparator()
         exit_action = file_menu.addAction(tr("menu_exit"))
         exit_action.triggered.connect(self.close)
@@ -594,6 +800,19 @@ class MainWindow(QMainWindow):
         help_menu = menubar.addMenu(tr("menu_help"))
         shortcuts_action = help_menu.addAction(tr("menu_keyboard_shortcuts"))
         shortcuts_action.triggered.connect(self._show_shortcuts)
+
+        size_menu = menubar.addMenu(i18n.tr_text("Interface Size"))
+        current_scale = self._settings.value("interface_scale", 1.0, type=float)
+        for label, scale in (("Standard", 1.0), ("Large", 1.15), ("Extra Large", 1.3)):
+            action = size_menu.addAction(i18n.tr_text(label))
+            action.setCheckable(True)
+            action.setChecked(abs(current_scale - scale) < 0.01)
+            action.triggered.connect(lambda _checked, value=scale: self._set_interface_scale(value))
+
+    def _set_interface_scale(self, scale):
+        self._settings.setValue("interface_scale", scale)
+        self._apply_theme(self.current_theme)
+        self._build_menu_bar()
 
     def _open_cost_log(self):
         """Reports -> Cost change log, pre-filled with the project in focus."""
@@ -665,6 +884,67 @@ class MainWindow(QMainWindow):
         box.setTextFormat(Qt.RichText)
         box.setText(html)
         box.exec()
+
+    BACKUP_CHECK_INTERVAL_MS = 60 * 60 * 1000  # hourly
+
+    def _start_backup_timer(self):
+        """The startup backup alone misses every day the app is simply left
+        open; an hourly check takes the new day's snapshot as soon as the
+        date changes (maybe_create_auto_backup does nothing otherwise)."""
+        self._backup_timer = QTimer(self)
+        self._backup_timer.setInterval(self.BACKUP_CHECK_INTERVAL_MS)
+        self._backup_timer.timeout.connect(self._periodic_backup)
+        self._backup_timer.start()
+
+    def _periodic_backup(self):
+        if self._running_workers():
+            return
+        if backup.last_backup_datetime(self.data_dir) is not None and \
+                backup.last_backup_datetime(self.data_dir).date() == datetime.now().date():
+            return
+        healthy, problem = backup.check_integrity(self.db.db_path)
+        if not healthy:
+            logger.error("Integrity check failed during periodic backup: %s", problem)
+        run_backup_cycle(self.db.db_path, self.data_dir, healthy=healthy)
+        self._update_status_bar()
+
+    def _choose_extra_backup_folder(self):
+        import auth
+        if not auth.is_manager(self.db):
+            QMessageBox.information(self, tr_text("Second backup folder"), tr_text("Managers only"))
+            return
+        current = config.load_extra_backup_dir()
+        box = QMessageBox(self)
+        box.setWindowTitle(tr_text("Second backup folder"))
+        box.setIcon(QMessageBox.Information)
+        box.setText(tr_text(
+            "Every daily backup can also be copied to a second place - another drive, "
+            "a USB disk, or a OneDrive / Google Drive folder - so a disk failure does not "
+            "take the backups with it."
+        ) + "\n\n" + tr_text("Current:") + " " + (current or tr_text("not set")))
+        choose_btn = box.addButton(tr_text("Choose folder…"), QMessageBox.AcceptRole)
+        stop_btn = box.addButton(tr_text("Stop copying"), QMessageBox.DestructiveRole) if current else None
+        box.addButton(QMessageBox.Cancel)
+        box.exec()
+        clicked = box.clickedButton()
+        if stop_btn is not None and clicked is stop_btn:
+            config.save_extra_backup_dir(None)
+            return
+        if clicked is not choose_btn:
+            return
+        folder = QFileDialog.getExistingDirectory(self, tr_text("Second backup folder"), current or "")
+        if not folder:
+            return
+        data_root = os.path.normcase(os.path.realpath(self.data_dir))
+        if os.path.normcase(os.path.realpath(folder)).startswith(data_root):
+            QMessageBox.warning(self, tr_text("Second backup folder"), tr_text(
+                "Choose a folder outside the data folder - ideally on another drive."))
+            return
+        config.save_extra_backup_dir(folder)
+        latest = backup._existing_backups(backup.backups_dir_for(self.data_dir))
+        if latest and backup.copy_to_extra_folder(latest[-1][1], folder):
+            QMessageBox.information(self, tr_text("Second backup folder"),
+                                    tr_text("The latest backup was copied to:") + f"\n{folder}")
 
     def _update_status_bar(self):
         last_backup = backup.last_backup_datetime(self.data_dir)
@@ -751,24 +1031,41 @@ class MainWindow(QMainWindow):
             )
             if confirm == QMessageBox.Yes:
                 try:
-                    shutil.copy2(self.db.db_path, new_db_path)
+                    backup.snapshot_database(self.db.db_path, new_db_path)
                     if os.path.isdir(self.db.attachments_dir):
                         shutil.copytree(self.db.attachments_dir, new_attachments_dir, dirs_exist_ok=True)
                 except OSError as exc:
                     QMessageBox.critical(self, "Copy failed", str(exc))
                     return
 
-        self._switch_to_data_dir(new_dir)
-        QMessageBox.information(self, "Data folder changed", f"Now using:\n{new_dir}")
+        if self._switch_to_data_dir(new_dir):
+            QMessageBox.information(self, "Data folder changed", f"Now using:\n{new_dir}")
 
     def _switch_to_data_dir(self, new_dir):
         """Points the app at *new_dir* and rebuilds the UI around it."""
-        self.db = Database(config.db_path_for(new_dir), config.attachments_dir_for(new_dir))
+        if self._running_workers():
+            self.statusBar().showMessage(tr_text("Wait for background operations to finish before changing the data folder."))
+            return False
+        import auth
+        from PySide6.QtWidgets import QDialog
+        from ui.login_dialog import LoginDialog
+
+        protect_database_before_open(config.db_path_for(new_dir), new_dir, parent=self)
+        new_db = Database(config.db_path_for(new_dir), config.attachments_dir_for(new_dir))
+        # Authenticate before replacing the current database or persisting the
+        # folder. Cancelling leaves the original database/session untouched.
+        dialog = LoginDialog(new_db, parent=self, first_run=new_db.count_users() == 0,
+                             establish_session=False)
+        if dialog.exec() != QDialog.Accepted or dialog.user is None:
+            return False
+        auth.login(dialog.user, new_db)
+        self.db = new_db
         self.data_dir = new_dir
         config.save_data_dir(new_dir)
         self._update_status_bar()
         self._build_central_widget()
         self._apply_theme(self.current_theme)
+        return True
 
     def _restore_backup(self):
         """Restores a backup into a NEW folder - never over the live data.
@@ -802,8 +1099,8 @@ class MainWindow(QMainWindow):
 
         question = QMessageBox.question(self, tr("restore_title"), tr("restore_switch"))
         if question == QMessageBox.Yes:
-            self._switch_to_data_dir(target)
-            QMessageBox.information(self, tr("restore_title"), f"{tr('restore_done')}\n{target}")
+            if self._switch_to_data_dir(target):
+                QMessageBox.information(self, tr("restore_title"), f"{tr('restore_done')}\n{target}")
         else:
             QMessageBox.information(self, tr("restore_title"), f"{tr('restore_done')}\n{target}")
 
@@ -827,7 +1124,7 @@ class MainWindow(QMainWindow):
             fd, staged_db = tempfile.mkstemp(prefix="pt_backup_", suffix=".db")
             os.close(fd)
             try:
-                src = sqlite3.connect(db_path)
+                src = sqlite3.connect(db_path, timeout=30)
                 try:
                     dst = sqlite3.connect(staged_db)
                     try:
@@ -871,6 +1168,110 @@ class MainWindow(QMainWindow):
         worker.start()
 
 
+def run_backup_cycle(db_path, data_dir, healthy=True):
+    """One round of automatic protection: today's database snapshot (if
+    not taken yet), a copy of it in the optional second folder, and the
+    incremental attachments mirror. Never raises."""
+    try:
+        new_backup = backup.maybe_create_auto_backup(db_path, data_dir, prune=healthy)
+    except Exception:  # noqa: BLE001
+        logger.exception("Automatic backup failed")
+        new_backup = None
+    if new_backup:
+        try:
+            backup.copy_to_extra_folder(new_backup, config.load_extra_backup_dir())
+        except Exception:  # noqa: BLE001
+            logger.exception("Copy to second backup folder failed")
+    try:
+        backup.mirror_attachments(config.attachments_dir_for(data_dir), data_dir)
+    except Exception:  # noqa: BLE001
+        logger.exception("Attachment mirror failed")
+    return new_backup
+
+
+def protect_database_before_open(db_path, data_dir, parent=None):
+    """Checks and backs up a database BEFORE Database() opens it.
+
+    Opening runs the schema migrations, which write to the file. Taking the
+    daily backup first means a migration problem can always be undone from
+    that day's backup. When SQLite reports damage, the backup rotation is
+    not pruned (so older, good backups survive) and the user is told.
+    Never raises: protection must not stop the app from opening."""
+    try:
+        healthy, problem = backup.check_integrity(db_path)
+    except Exception:  # noqa: BLE001 - never block startup
+        logger.exception("Integrity check failed to run")
+        healthy, problem = True, ""
+    run_backup_cycle(db_path, data_dir, healthy=healthy)
+    if not healthy:
+        logger.error("Database integrity check failed for %s: %s", db_path, problem)
+        QMessageBox.warning(
+            parent, tr_text("Database integrity problem"),
+            tr_text("SQLite reported a problem with the database file:") + f"\n{db_path}\n\n{problem}\n\n"
+            + tr_text("Your existing backups have been kept (none were removed). Consider restoring "
+                      "a backup from the File menu, and check your recent work before entering more data.")
+        )
+    return healthy
+
+
+def resolve_data_dir(app_dir):
+    """Decides which data folder to open, or returns None to exit.
+
+    A data folder that was chosen before but cannot be found now (an
+    external / USB / network drive not connected, a renamed folder) is
+    never silently replaced by a new empty one: the user can retry, pick
+    another folder, or exit. A folder without a database only gets a new
+    empty one after explicit confirmation."""
+    configured = config.configured_data_dir()
+    while configured and not os.path.isdir(configured):
+        box = QMessageBox()
+        box.setIcon(QMessageBox.Warning)
+        box.setWindowTitle(tr_text("Data folder not available"))
+        box.setText(
+            tr_text("The data folder cannot be found:") + f"\n{configured}\n\n"
+            + tr_text("If it is on an external, USB or network drive, connect it and press Retry. "
+                      "Your data has not been changed.")
+        )
+        retry_btn = box.addButton(tr_text("Retry"), QMessageBox.AcceptRole)
+        choose_btn = box.addButton(tr_text("Choose another folder…"), QMessageBox.ActionRole)
+        box.addButton(tr_text("Exit"), QMessageBox.RejectRole)
+        box.setDefaultButton(retry_btn)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked is retry_btn:
+            continue
+        if clicked is choose_btn:
+            chosen = QFileDialog.getExistingDirectory(None, tr_text("Choose data folder"), configured)
+            if chosen:
+                configured = chosen
+            continue
+        return None
+
+    if not configured:
+        QMessageBox.information(
+            None, tr_text("Choose data folder"),
+            tr_text("Please choose a folder where Project Tracker should store its "
+                    "database and attachments (e.g. a folder on a shared drive).")
+        )
+        chosen = QFileDialog.getExistingDirectory(None, tr_text("Choose data folder"), app_dir)
+        if not chosen:
+            return None
+        configured = chosen
+    elif not os.path.isfile(config.db_path_for(configured)):
+        answer = QMessageBox.question(
+            None, tr_text("No database found"),
+            tr_text("No Project Tracker database was found in:") + f"\n{configured}\n\n"
+            + tr_text("Create a new, EMPTY database here?") + "\n\n"
+            + tr_text("Choose No to exit if you expected your projects to be in this folder."),
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+        )
+        if answer != QMessageBox.Yes:
+            return None
+
+    config.save_data_dir(configured)
+    return configured
+
+
 def main():
     _install_excepthook()
     app_dir = get_app_dir()
@@ -878,25 +1279,31 @@ def main():
         sys.path.insert(0, app_dir)
 
     app = QApplication(sys.argv)
+    from ui.fonts import install_cairo
+    install_cairo(app)
     _set_windows_app_id()
     app.setWindowIcon(_app_icon())
+    # Startup messages appear before the sign-in screen: use the saved
+    # language, the same rule the sign-in screen follows.
+    saved_language = QSettings("ProjectTracker", "MainWindow").value("language", "en")
+    i18n.set_language("ar" if saved_language == "ar" else "en")
+    if i18n.get_language() == "ar":
+        app.setLayoutDirection(Qt.RightToLeft)
 
-    data_dir = config.load_data_dir()
+    data_dir = resolve_data_dir(app_dir)
     if not data_dir:
-        QMessageBox.information(
-            None, "Choose data folder",
-            "Please choose a folder where Project Tracker should store its "
-            "database and attachments (e.g. a folder on a shared drive)."
-        )
-        chosen = QFileDialog.getExistingDirectory(None, "Choose data folder", app_dir)
-        data_dir = chosen or app_dir
-        config.save_data_dir(data_dir)
+        return
+
+    # Automatic protection against corruption / accidental deletion - at
+    # most once a day, and BEFORE Database() runs its migrations.
+    protect_database_before_open(config.db_path_for(data_dir), data_dir)
 
     db = Database(config.db_path_for(data_dir), config.attachments_dir_for(data_dir))
 
-    # Silent, automatic protection against corruption/accidental deletion —
-    # at most once a day, never blocks startup on failure.
-    backup.maybe_create_auto_backup(config.db_path_for(data_dir), data_dir)
+    # Multi-user sign-in gate: create the first manager account, or sign in.
+    from ui.login_dialog import run_login_flow
+    if not run_login_flow(db):
+        return
 
     window = MainWindow(db, data_dir)
     window.show()
@@ -904,4 +1311,11 @@ def main():
 
 
 if __name__ == "__main__":
+    if "--check-installation" in sys.argv:
+        from installation_check import run_check
+        index = sys.argv.index("--check-installation")
+        if index + 1 >= len(sys.argv):
+            raise SystemExit("--check-installation requires a report file path")
+        raise SystemExit(run_check(sys.argv[index + 1], "--test-ai" in sys.argv,
+                                   "--smoke-ui" in sys.argv))
     main()

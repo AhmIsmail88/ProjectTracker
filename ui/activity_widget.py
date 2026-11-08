@@ -9,6 +9,8 @@ Reusable "Activity / History" timeline rendering, shared by:
 Renders audit_log rows (see database.py) as a readable, colored timeline.
 """
 
+from i18n import tr_text
+
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QListWidget, QListWidgetItem, QLabel, QDialog, QPushButton, QHBoxLayout
 from PySide6.QtGui import QColor, QBrush
 from PySide6.QtCore import Qt
@@ -54,6 +56,15 @@ ACTION_COLOR = {
     "deleted": "#DC2626",
     "restored": "#9333EA",
     "purged": "#6B7280",
+    "attachment_added": "#0E9F82",
+    "attachment_deleted": "#DC2626",
+    "attachment_restored": "#9333EA",
+}
+
+_ATTACHMENT_VERBS = {
+    "attachment_added": "attached",
+    "attachment_deleted": "removed attachment",
+    "attachment_restored": "restored attachment",
 }
 
 
@@ -66,7 +77,7 @@ def _format_value(v):
 def _format_row(row):
     field_label = FIELD_LABELS.get(row["field"], row["field"] or "")
     action = row["action"]
-    icon = ACTION_ICON.get(action, "\u2022")
+    icon = ACTION_ICON.get(action, "\U0001F4CE" if action in _ATTACHMENT_VERBS else "\u2022")
     name = row["entity_name"] or f"#{row['entity_id']}"
 
     if action == "created":
@@ -77,6 +88,10 @@ def _format_row(row):
         text = f"{icon}  \u201c{name}\u201d restored"
     elif action == "purged":
         text = f"{icon}  \u201c{name}\u201d permanently deleted"
+    elif action in _ATTACHMENT_VERBS:
+        file_name = _format_value(row["new_value"])
+        category = row["field"] or ""
+        text = f"{icon}  “{name}” — {tr_text(_ATTACHMENT_VERBS[action])} {category}: {file_name}"
     elif action == "updated":
         old = _format_value(row["old_value"])
         new = _format_value(row["new_value"])
@@ -97,7 +112,7 @@ class ActivityListWidget(QWidget):
         layout.setContentsMargins(0, 8, 0, 0)
         self.list_widget = QListWidget()
         layout.addWidget(self.list_widget)
-        self.empty_label = QLabel("No activity recorded yet.")
+        self.empty_label = QLabel(tr_text("No activity recorded yet."))
         self.empty_label.setAlignment(Qt.AlignCenter)
         self.empty_label.setVisible(False)
         layout.addWidget(self.empty_label)
@@ -138,7 +153,7 @@ class ActivityDialog(QDialog):
 
         btn_row = QHBoxLayout()
         btn_row.addStretch()
-        close_btn = QPushButton("Close")
+        close_btn = QPushButton(tr_text("Close"))
         close_btn.clicked.connect(self.accept)
         btn_row.addWidget(close_btn)
         layout.addLayout(btn_row)

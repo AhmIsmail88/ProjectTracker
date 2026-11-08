@@ -6,6 +6,9 @@ across several selected items' same field at once, instead of opening
 each item individually.
 """
 
+from i18n import tr_text
+import auth
+
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QFormLayout, QLabel, QPushButton,
     QComboBox, QLineEdit, QCheckBox, QMessageBox
@@ -18,7 +21,7 @@ class FindReplaceDialog(QDialog):
         self.db = db
         self.item_ids = list(item_ids)
 
-        self.setWindowTitle("Find & Replace")
+        self.setWindowTitle(tr_text("Find & Replace"))
         self.setMinimumWidth(420)
 
         layout = QVBoxLayout(self)
@@ -31,32 +34,32 @@ class FindReplaceDialog(QDialog):
 
         self.field_combo = QComboBox()
         for key, label in self.db.BULK_REPLACE_FIELDS:
-            self.field_combo.addItem(label, key)
+            self.field_combo.addItem(tr_text(label), key)
         self.field_combo.currentIndexChanged.connect(self._update_preview)
-        form.addRow("Field:", self.field_combo)
+        form.addRow(tr_text("Field:"), self.field_combo)
 
         self.find_edit = QLineEdit()
         self.find_edit.textChanged.connect(self._update_preview)
-        form.addRow("Find:", self.find_edit)
+        form.addRow(tr_text("Find:"), self.find_edit)
 
         self.replace_edit = QLineEdit()
-        form.addRow("Replace with:", self.replace_edit)
+        form.addRow(tr_text("Replace with:"), self.replace_edit)
 
-        self.case_check = QCheckBox("Case-sensitive")
+        self.case_check = QCheckBox(tr_text("Case-sensitive"))
         self.case_check.stateChanged.connect(self._update_preview)
         form.addRow("", self.case_check)
 
         layout.addLayout(form)
 
-        self.preview_label = QLabel("Type something in \u201cFind\u201d to see how many items match.")
+        self.preview_label = QLabel(tr_text("Type something in \u201cFind\u201d to see how many items match."))
         self.preview_label.setWordWrap(True)
         layout.addWidget(self.preview_label)
 
         btn_row = QHBoxLayout()
         btn_row.addStretch()
-        cancel_btn = QPushButton("Cancel")
+        cancel_btn = QPushButton(tr_text("Cancel"))
         cancel_btn.clicked.connect(self.reject)
-        self.apply_btn = QPushButton("Apply")
+        self.apply_btn = QPushButton(tr_text("Apply"))
         self.apply_btn.setObjectName("primaryButton")
         self.apply_btn.setEnabled(False)
         self.apply_btn.clicked.connect(self._apply)
@@ -83,6 +86,8 @@ class FindReplaceDialog(QDialog):
         self.apply_btn.setEnabled(count > 0)
 
     def _apply(self):
+        if not auth.can_edit_items(self.db, self.item_ids):
+            return
         field = self.field_combo.currentData()
         find_text = self.find_edit.text()
         replace_text = self.replace_edit.text()

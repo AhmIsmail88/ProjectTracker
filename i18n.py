@@ -8,6 +8,7 @@ individually.
 """
 
 STRINGS = {
+    "language_wait": {"en": "Language will change when the current operation finishes.", "ar": "سيتم تغيير اللغة عند انتهاء العملية الجارية."},
     "app_title": {"en": "Project Tracker", "ar": "متابعة المشاريع"},
     "projects": {"en": "Projects", "ar": "المشاريع"},
     "suppliers": {"en": "Suppliers", "ar": "الموردين"},
@@ -25,7 +26,7 @@ STRINGS = {
     "all_statuses": {"en": "All Statuses", "ar": "كل الحالات"},
     "all_suppliers": {"en": "All Suppliers", "ar": "كل الموردين"},
     "all_areas": {"en": "All Areas", "ar": "كل الأماكن"},
-    "add_item": {"en": "+ Add Item", "ar": "+ إضافة بند"},
+    "add_item": {"en": "Add Item", "ar": "إضافة بند"},
     "edit_item": {"en": "Edit Item", "ar": "تعديل البند"},
     "delete_item": {"en": "Delete Item", "ar": "حذف البند"},
     "duplicate": {"en": "Duplicate (Next Row)", "ar": "تكرار (سطر جديد)"},
@@ -39,8 +40,8 @@ STRINGS = {
     "trash": {"en": "Trash", "ar": "سلة المحذوفات"},
     "undo": {"en": "Undo", "ar": "تراجع"},
     "language": {"en": "Language: العربية", "ar": "Language: English"},
-    "dark_mode": {"en": "\U0001F319 Dark Mode", "ar": "\U0001F319 الوضع الداكن"},
-    "light_mode": {"en": "\u2600\ufe0f Light Mode", "ar": "\u2600\ufe0f الوضع الفاتح"},
+    "dark_mode": {"en": "Dark Mode", "ar": "الوضع الداكن"},
+    "light_mode": {"en": "Light Mode", "ar": "الوضع الفاتح"},
     "export_excel": {"en": "Export to Excel (.xlsx)", "ar": "تصدير إلى إكسل (.xlsx)"},
     "export_pdf": {"en": "Export to PDF report (with chart)", "ar": "تصدير تقرير PDF (مع رسم بياني)"},
     "no_project_selected": {"en": "No project selected", "ar": "لم يتم اختيار مشروع"},
@@ -139,6 +140,10 @@ STRINGS = {
     "palette_action_search_all": {"en": "Search all projects", "ar": "البحث في كل المشاريع"},
     "palette_action_toggle_theme": {"en": "Switch light/dark mode", "ar": "تبديل الوضع الفاتح/الداكن"},
     "palette_action_toggle_language": {"en": "Switch language", "ar": "تبديل اللغة"},
+    "sign_out": {"en": 'Sign out', "ar": 'تسجيل الخروج'},
+    "sign_out_question": {"en": 'Sign out of the current account?', "ar": 'هل تريد تسجيل الخروج من الحساب الحالي؟'},
+    "sign_out_wait": {"en": 'Wait for background operations to finish before signing out.', "ar": 'انتظر انتهاء العمليات الجارية قبل تسجيل الخروج.'},
+    "login_lang_switch": {"en": 'العربية', "ar": 'English'},
 }
 
 _current_lang = "ar"
@@ -158,3 +163,294 @@ def tr(key):
     if not entry:
         return key
     return entry.get(_current_lang, entry.get("en", key))
+
+
+# Display-only translations: keep database fields, status values and export
+# column identifiers in English while presenting localized labels.
+DISPLAY_AR = {
+    "AI Settings": "إعدادات المساعد الذكي", "API key": "مفتاح API", "Model": "النموذج",
+    "Enter your OpenRouter key. Settings are saved for your Windows user and are not included when sharing the app.": "أدخل مفتاح OpenRouter الخاص بك. تُحفظ الإعدادات لحسابك في Windows ولا تُضمَّن عند مشاركة البرنامج.",
+    "Leave blank to keep the saved key": "اتركه فارغًا للاحتفاظ بالمفتاح المحفوظ",
+    "Internet access and a valid API key are required. Model availability and usage limits depend on OpenRouter.": "يلزم اتصال بالإنترنت ومفتاح API صالح. توافر النماذج وحدود الاستخدام تعتمد على OpenRouter.",
+    "Open AI Settings to configure your key, then use Test AI Connection.": "افتح إعدادات المساعد لإدخال مفتاحك، ثم اختبر الاتصال.",
+    "Use AI Settings to change your key or model.": "يمكنك تغيير المفتاح أو النموذج من إعدادات المساعد.",
+    "Enter an OpenRouter API key.": "أدخل مفتاح OpenRouter.",
+    "The API key must not contain spaces.": "مفتاح API لا يقبل المسافات.",
+    "Created": "تمت الإضافة", "Updated": "تم التعديل", "Deleted": "تم الحذف", "Restored": "تمت الاستعادة",
+    "Current Project": "المشروع الحالي", "Choose a project…": "اختر مشروعًا…",
+    "Item Details": "تفاصيل البند", "Details": "التفاصيل", "Last Updated": "آخر تحديث",
+    "Recent Changes": "آخر التغييرات", "No attachments yet.": "لا توجد مرفقات بعد.",
+    "{count} items selected": "تم تحديد {count} بند", "Duplicate": "تكرار",
+    "Search": "البحث", "Remove this filter": "إزالة هذا الفلتر",
+    "Missing Documents": "مستندات الشراء الناقصة", "Click to review the matching items": "اضغط لعرض البنود المعنية",
+    "Double-click an item to open its project.": "انقر مرتين على البند لفتح مشروعه.",
+    "No matching items.": "لا توجد بنود مطابقة.", "Main Projects / Groups": "المشاريع الرئيسية / المجموعات",
+    "All Groups": "كل المجموعات", "Currencies": "عملات",
+    "Documents & Attachments": "المستندات والمرفقات", "All Documents": "كل المستندات",
+    "Upload as": "تصنيف الرفع", "Upload Files…": "رفع ملفات…",
+    "File Name": "اسم الملف", "Uploaded": "تاريخ الرفع", "Preview": "معاينة",
+    "{count} files · Procurement: {documents}": "{count} ملفات · مستندات الشراء: {documents}",
+    "Missing": "غير موجودة", "No attachments yet. Choose a category and upload files.": "لا توجد مرفقات بعد. اختر التصنيف ثم ارفع الملفات.",
+    "Preview unavailable. Use Open to view this file.": "المعاينة غير متاحة لهذا الملف. استخدم «فتح» لعرضه.",
+    "Delivery Documents": "مستندات التوريد", "This item is not fully delivered. Upload these documents anyway?": "لم يكتمل توريد هذا البند. هل تريد رفع المستندات؟",
+    "Upload failed": "تعذر رفع الملفات", "Attachment removed. You can undo this.": "تمت إزالة المرفق. يمكنك التراجع.",
+    "Reference": "مرجع", "Warranty": "الضمان", "O&M Manual": "دليل التشغيل والصيانة",
+    "Test Certificate": "شهادة اختبار", "As-Built Drawing": "مخططات التنفيذ الفعلي",
+    "Spare Parts List": "قائمة قطع الغيار", "Invoice": "فاتورة",
+    "Bulk Edit…": "تعديل جماعي…",
+    "Projects Shown": "المشاريع المعروضة", "Missing Unit Cost": "بنود بدون سعر وحدة",
+    "Stale Items": "بنود تحتاج متابعة", "Days Untouched": "أيام دون تحديث",
+    "Export Selected Projects": "تصدير المشاريع المحددة",
+    "Editing {count} items. Only checked fields will change.": "تعديل {count} بند. ستتغير الحقول المحددة فقط.",
+    "Apply to {count} items": "تطبيق على {count} بند",
+    "File missing": "الملف غير موجود", "The attachment is missing from this data folder.": "المرفق غير موجود في مجلد البيانات الحالي.",
+    "Skipped {count} invalid or incomplete rows.": "تم تجاوز {count} صفوف غير صالحة أو غير مكتملة. افتح التفاصيل لعرض الأسباب.",
+    "Import complete": "اكتمل الاستيراد",
+    "No prices were changed.": "لم يتم تغيير أي أسعار.",
+    "{count} item(s) already had that price.": "{count} بند كان سعره مطابقًا بالفعل.",
+    "Skipped {count} row(s): the Item ID belongs to a different item in this data folder (was the file exported from another copy?).":
+        "تم تجاوز {count} صف: رقم البند يخص بندًا مختلفًا في مجلد البيانات الحالي (هل الملف مُصدَّر من نسخة أخرى؟).",
+    "{count} item price(s) will change. Apply these changes?": "سيتغير سعر {count} بند. هل تريد تطبيق التغييرات؟",
+    "{count} row(s) already in the project were left out.": "تم استبعاد {count} صف موجود بالفعل في المشروع.",
+    "Nothing was imported.": "لم يتم استيراد أي شيء.",
+    "{count} row(s) in this file match items the project already has (same name, area and unit). Was this file imported before?":
+        "{count} صف في هذا الملف يطابق بنودًا موجودة بالفعل في المشروع (نفس الاسم والمنطقة والوحدة). هل سبق استيراد هذا الملف؟",
+    "Skip existing rows": "تجاوز الصفوف الموجودة", "Import all rows": "استيراد كل الصفوف",
+    "attached": "أُرفق له", "removed attachment": "حُذف مرفق", "restored attachment": "استُرجع مرفق",
+    "Empty old trash…": "تفريغ المحذوفات القديمة…",
+    "Nothing in the trash is older than {days} days.": "لا يوجد في المحذوفات ما مضى عليه أكثر من {days} يومًا.",
+    "Permanently delete {projects} project(s) with {project_items} item(s), and {items} item(s) deleted individually, all deleted more than {days} days ago?\n\nA backup of the database is taken first and kept until you remove it.":
+        "حذف نهائي لـ {projects} مشروع (بها {project_items} بند)، و{items} بند محذوف منفردًا، وكلها محذوفة منذ أكثر من {days} يومًا؟\n\nتُؤخذ نسخة احتياطية من قاعدة البيانات أولًا وتبقى حتى تحذفها بنفسك.",
+    "The backup failed, so nothing was deleted.": "فشلت النسخة الاحتياطية، لذلك لم يُحذف شيء.",
+    "Trash emptied. Backup taken before deleting": "تم تفريغ المحذوفات. النسخة الاحتياطية المأخوذة قبل الحذف",
+    "Send project data?": "إرسال بيانات المشروع؟",
+    "To answer, the item names, suppliers, quantities and statuses of the chosen scope are sent to OpenRouter and the selected model. Free models may store or use the data they receive. Continue?":
+        "للإجابة، تُرسل أسماء البنود والموردين والكميات والحالات للنطاق المختار إلى OpenRouter والنموذج المحدد. النماذج المجانية قد تحتفظ بالبيانات التي تستقبلها أو تستخدمها. هل تريد المتابعة؟",
+    "This scope is large, so a summary was sent instead of every item. Choose a single project or group for item-level answers.":
+        "هذا النطاق كبير، لذلك أُرسل ملخص بدل كل البنود. اختر مشروعًا أو مجموعة واحدة للحصول على إجابات على مستوى البند.",
+    "Second backup folder": "مجلد النسخ الاحتياطي الثاني",
+    "Second backup folder…": "مجلد النسخ الاحتياطي الثاني…",
+    "Every daily backup can also be copied to a second place - another drive, a USB disk, or a OneDrive / Google Drive folder - so a disk failure does not take the backups with it.":
+        "يمكن نسخ كل نسخة احتياطية يومية إلى مكان ثانٍ — قرص آخر أو فلاشة أو مجلد OneDrive / Google Drive — حتى لا تضيع النسخ مع تلف القرص.",
+    "Current": "الحالي", "not set": "غير محدد", "Choose folder…": "اختيار مجلد…",
+    "Stop copying": "إيقاف النسخ",
+    "Choose a folder outside the data folder - ideally on another drive.": "اختر مجلدًا خارج مجلد البيانات، ويفضل على قرص آخر.",
+    "The latest backup was copied to": "تم نسخ آخر نسخة احتياطية إلى",
+    "SQLite reported a problem with the database file": "أبلغ SQLite عن مشكلة في ملف قاعدة البيانات",
+    "Your existing backups have been kept (none were removed). Consider restoring a backup from the File menu, and check your recent work before entering more data.":
+        "تم الاحتفاظ بكل النسخ الاحتياطية الموجودة (لم يُحذف أي منها). يُنصح باسترجاع نسخة احتياطية من قائمة ملف، ومراجعة آخر تعديلاتك قبل إدخال بيانات جديدة.",
+    "The data folder cannot be found": "لا يمكن العثور على مجلد البيانات",
+    "If it is on an external, USB or network drive, connect it and press Retry. Your data has not been changed.":
+        "إذا كان على قرص خارجي أو فلاشة أو قرص شبكة، قم بتوصيله ثم اضغط «إعادة المحاولة». لم يتم تغيير بياناتك.",
+    "Choose data folder": "اختيار مجلد البيانات",
+    "Please choose a folder where Project Tracker should store its database and attachments (e.g. a folder on a shared drive).":
+        "اختر مجلدًا يحفظ فيه البرنامج قاعدة البيانات والمرفقات (مثل مجلد على قرص مشترك).",
+    "No database found": "لا توجد قاعدة بيانات",
+    "No Project Tracker database was found in": "لم يتم العثور على قاعدة بيانات للبرنامج في",
+    "Create a new, EMPTY database here?": "هل تريد إنشاء قاعدة بيانات جديدة فارغة هنا؟",
+    "Choose No to exit if you expected your projects to be in this folder.": "اختر «لا» للخروج إذا كنت تتوقع وجود مشاريعك في هذا المجلد.",
+    "Create a new project": "إنشاء مشروع جديد", "Add to existing project": "إضافة إلى مشروع موجود",
+    "— not mapped —": "— غير مرتبط —", "Sheet": "الورقة",
+    "<b>Preview</b> (first rows, as they'll be imported)": "<b>معاينة</b> (أول الصفوف كما ستُستورد)",
+    "New supplier": "مورد جديد", "(No supplier)": "(بدون مورد)", "deleted": "حُذف",
+    "You": "أنت", "AI": "المساعد", "System": "النظام",
+    "Database busy": "قاعدة البيانات مشغولة",
+    "The database is being used by another user or computer right now, so this change was NOT saved. Wait a moment and try again.":
+        "قاعدة البيانات مستخدمة الآن من مستخدم أو جهاز آخر، لذلك لم يتم حفظ هذا التعديل. انتظر قليلًا ثم حاول مرة أخرى.",
+    "The item will come back when its project is restored from the trash.":
+        "سيعود البند عند استرجاع مشروعه من المحذوفات.",
+    "Data folder not available": "مجلد البيانات غير متاح",
+    "Retry": "إعادة المحاولة", "Choose another folder…": "اختيار مجلد آخر…",
+    "Database integrity problem": "مشكلة في سلامة قاعدة البيانات",
+    "Over-supplied": "توريد زائد", "Delivered w/o request": "توريد بدون طلب",
+    "Over-requested": "طلب زائد", "Save": "حفظ", "OK": "موافق",
+    "Field": "الحقل", "Find": "البحث عن", "Replace with": "استبدال بـ",
+    "Computed Status": "الحالة المحسوبة", "Default Currency": "العملة الافتراضية",
+    "Remaining to deliver": "المتبقي للتوريد", "Remaining to request": "المتبقي للطلب",
+    "Remarks / Drawing No.": "ملاحظات / رقم المخطط", "Delete key": "مفتاح Delete",
+    "A clean, professional PDF for sharing with management or a consultant — the stat cards, status breakdown, and estimated value by currency (no item-level list).": "تقرير PDF للمشاركة يحتوي المؤشرات والحالات والقيمة حسب العملة.",
+    "Exports every item from the checked project(s) into ONE combined Excel sheet (not one tab per project) — for comparing them side by side.": "تصدير بنود المشاريع المحددة في ورقة إكسل واحدة للمقارنة.",
+    "Exports every item from the checked project(s) with an editable Unit Cost column — fill in prices in Excel (much faster than one item at a time), then use “Import Cost Updates” below to apply them.": "تصدير البنود لتعبئة أسعار الوحدة في إكسل، ثم استيراد تحديثات الأسعار.",
+    "Exports every project currently shown below (after your search) into ONE Excel file, each project on its own tab.": "تصدير المشاريع الظاهرة بعد البحث إلى ملف إكسل، بورقة لكل مشروع.",
+    "Just the “Possibly Forgotten” item list, as its own document — for sharing that on its own without the rest of the dashboard.": "تصدير قائمة البنود التي تحتاج متابعة في تقرير مستقل.",
+    "Reads a file you filled in (from Export for Cost Update) and applies the prices back. A blank Unit Cost cell is left untouched, so you can fill prices in over several sessions.": "استيراد أسعار الوحدة من الملف المصدّر سابقًا. الخلايا الفارغة لا تغيّر الأسعار الحالية.",
+    "Rename or delete a Main Project (Group). Deleting a group never deletes its member projects — they just become ungrouped.": "تغيير اسم المجموعة أو حذفها. عند الحذف تبقى مشاريعها بدون مجموعة.",
+    "The same “Possibly Forgotten” list, saved as an Excel sheet instead of a PDF.": "حفظ قائمة البنود التي تحتاج متابعة في ملف إكسل.",
+    "Which overall/main project this belongs to — several related section-projects (e.g. different areas of the same site) can share one Group, so you can select and report on them together from the Dashboard or AI Assistant.": "اجمع مشاريع الأقسام المرتبطة ضمن مشروع رئيسي لتحديدها وإعداد تقاريرها معًا.",
+    "“Contains all words” finds a cell that has every word you typed, in any order and even with different punctuation — e.g. searching “A B C” finds “B, A, C” too. “Contains exact phrase” requires that exact wording in that exact order. “Exact match” requires the whole field to equal what you typed, nothing more.": "كل الكلمات: مطابقة الكلمات بأي ترتيب. العبارة كاملة: بنفس الترتيب. مطابقة تامة: مطابقة محتوى الحقل كله.",
+    "Group": "المجموعة", "No items": "لا توجد بنود",
+    "Showing all {count} items | Total cost: {cost}": "عرض كل البنود ({count}) | التكلفة الإجمالية: {cost}",
+    "Showing {visible} of {count} items | Filtered cost: {cost}": "عرض {visible} من {count} بند | تكلفة النتائج: {cost}",
+    "More Filters": "فلاتر إضافية", "More Actions": "إجراءات إضافية",
+    "Table View": "عرض الجدول", "All Columns": "كل الأعمدة", "Delivery": "التوريد",
+    "Costs": "التكاليف", "Documents": "المستندات", "Interface Size": "حجم الواجهة",
+    "Standard": "عادي", "Large": "كبير", "Extra Large": "كبير جدًا",
+    "All Projects": "كل المشاريع", "All projects": "كل المشاريع", "No projects selected": "لم تُحدد مشاريع",
+    "Selected Project": "المشروع المحدد", "Custom Selection ({count} projects)": "تحديد مخصص ({count} مشاريع)",
+    "Scope: {scope}": "النطاق: {scope}", "Choose all projects or select projects from the list.": "اختر كل المشاريع أو حدد مشاريع من القائمة.",
+    "Ungrouped": "بدون مجموعة", "Contains all words (any order)": "يحتوي كل الكلمات بأي ترتيب",
+    "Contains exact phrase": "يحتوي العبارة كاملة", "Exact match": "مطابقة تامة",
+    "Project Name": "اسم المشروع", "Total Items": "إجمالي البنود", "Stale Days": "أيام دون تحديث",
+    "Item Name": "اسم البند", "Pump Station / Area": "المحطة / المنطقة",
+    "Supplier": "المورد", "Unit": "الوحدة", "Currency": "العملة",
+    "Total Qty": "الكمية الإجمالية", "Requested Qty": "الكمية المطلوبة",
+    "Delivered Qty": "الكمية الموردة", "Remaining to Request": "المتبقي للطلب",
+    "Remaining to Deliver": "المتبقي للتوريد", "Unit Cost": "سعر الوحدة",
+    "Total Cost": "التكلفة الإجمالية", "Status": "الحالة", "PR/PO": "طلب / أمر شراء",
+    "Not requested": "لم يُطلب", "Partially Requested": "مطلوب جزئيًا",
+    "Requested": "مطلوب", "PO Issued": "صدر أمر الشراء",
+    "Partially Delivered": "مورّد جزئيًا", "Delivered": "تم التوريد", "On Hold": "متوقف",
+    "Name": "الاسم", "Location": "الموقع", "Contractor": "المقاول",
+    "Project Number": "رقم المشروع", "Project #": "رقم المشروع",
+    "Items": "البنود", "Delivered %": "نسبة التوريد", "Notes": "الملاحظات",
+    "Contact Person": "مسؤول التواصل", "Phone": "الهاتف", "Email": "البريد الإلكتروني",
+    "Project": "المشروع", "Area": "المنطقة", "Days": "الأيام", "Matched In": "موضع المطابقة",
+    "Total Quantity": "الكمية الإجمالية", "Requested Quantity": "الكمية المطلوبة",
+    "Delivered Quantity": "الكمية الموردة", "Supplier Name": "اسم المورد", "Remarks": "ملاحظات",
+    "Bulk Edit": "تعديل جماعي", "Edit Fields…": "تعديل الحقول…",
+    "Find & Replace": "بحث واستبدال", "Find & Replace…": "بحث واستبدال…",
+    "Clear Filters": "مسح الفلاتر", "Missing Unit Cost only": "بدون سعر وحدة فقط",
+    "Missing PR/PO only": "مستندات الشراء الناقصة فقط", "Delete Forever": "حذف نهائي",
+    "Close": "إغلاق", "Cancel": "إلغاء", "Apply": "تطبيق", "Rename": "إعادة تسمية",
+    "Group:": "المجموعة:", "Scope:": "النطاق:", "Category:": "الفئة:",
+    "Main Project (Group):": "المشروع الرئيسي (المجموعة):", "Manage Groups": "إدارة المجموعات",
+    "Manage Groups…": "إدارة المجموعات…", "Import from Excel": "استيراد من إكسل",
+    "Import": "استيراد", "Import into": "استيراد إلى", "Sheet:": "ورقة العمل:",
+    "Select Excel File...": "اختر ملف إكسل…", "Map spreadsheet columns to fields": "ربط أعمدة الملف بالحقول",
+    "<b>Preview</b> (first rows, as they'll be imported):": "<b>معاينة</b> الصفوف الأولى كما ستُستورد:",
+    "Export Filtered to Excel": "تصدير النتائج إلى إكسل", "Export Filtered View to Excel": "تصدير العرض المصفّى إلى إكسل",
+    "Export Results to Excel": "تصدير نتائج البحث إلى إكسل", "Export Checked → One Sheet": "تصدير المشاريع المحددة في ورقة واحدة",
+    "Export for Cost Update": "تصدير لتحديث الأسعار", "Import Cost Updates": "استيراد تحديثات الأسعار",
+    "Dashboard Summary (PDF)": "ملخص المتابعة (PDF)", "Possibly Forgotten (PDF)": "بنود تحتاج متابعة (PDF)",
+    "Possibly Forgotten (Excel)": "بنود تحتاج متابعة (إكسل)", "Refresh": "تحديث",
+    "Select All": "تحديد الكل", "Clear": "مسح التحديد", "All": "الكل", "None": "بدون",
+    "<b>Projects</b>": "<b>المشاريع</b>", "<b>Bulk Price Update</b>": "<b>تحديث الأسعار جماعيًا</b>",
+    "<b>Share Reports</b>": "<b>مشاركة التقارير</b>", "<b>Items by Status</b>": "<b>البنود حسب الحالة</b>",
+    "<b>Estimated Value by Currency</b>": "<b>القيمة التقديرية حسب العملة</b>",
+    "<b>Possibly Forgotten</b><br>still “Not requested” with no activity for 14+ days. Double-click to open.": "<b>بنود تحتاج متابعة</b><br>لم تُطلب ولم تتغير منذ 14 يومًا أو أكثر. انقر مرتين لفتح البند.",
+    "Nothing forgotten — every item has had recent activity.": "كل البنود شهدت نشاطًا حديثًا.",
+    "No projects yet — click “+ Add” to create one.": "لا توجد مشاريع بعد — اضغط «إضافة» لإنشاء مشروع.",
+    "No suppliers yet — click “+ Add” to create one.": "لا يوجد موردون بعد — اضغط «إضافة» لإضافة مورد.",
+    "No activity recorded yet.": "لا يوجد نشاط مسجل بعد.", "No file selected.": "لم يُحدد ملف.",
+    "Select a file to preview.": "اختر ملفًا لمعاينته.", "Upload File...": "رفع ملف…",
+    "Test AI Connection": "اختبار اتصال المساعد", "Send": "إرسال",
+    "Ask about your projects, e.g. 'what's still pending on Site A?'": "اسأل عن مشاريعك، مثل: ما البنود المتبقية في الموقع؟",
+    "Search All Projects": "البحث في كل المشاريع", "Search in:": "البحث في:",
+    "Match on:": "حقول البحث:", "Match mode:": "طريقة المطابقة:",
+    "Search item name, area, supplier, remarks, unit, status…": "ابحث بالاسم أو المنطقة أو المورد أو الملاحظات أو الحالة…",
+    "Type at least 2 characters to search.": "اكتب حرفين على الأقل للبحث.",
+    "Case-sensitive": "مطابقة حالة الأحرف", "Type something in “Find” to see how many items match.": "اكتب نص البحث لعرض عدد البنود المطابقة.",
+    "Move to Top": "نقل إلى البداية", "Move to Bottom": "نقل إلى النهاية",
+    "Move to Position…": "نقل إلى موضع…", "Reset Columns to Default": "إعادة الأعمدة للوضع الافتراضي",
+    "On Hold (manual override)": "إيقاف البند يدويًا", "Over-supply note*:": "سبب التوريد الزائد*:",
+    "Required when delivered quantity exceeds total quantity": "مطلوب عند تجاوز الكمية الموردة للكمية الإجمالية",
+    "Add a new supplier without leaving this form": "إضافة مورد جديد من هذه النافذة",
+    "Open →": "فتح", "Deleted Items": "البنود المحذوفة", "+ New": "إضافة جديد",
+    "Double-click or press F2 to edit directly": "انقر مرتين أو اضغط F2 للتعديل المباشر",
+    "No unit cost entered yet — double-click or press F2 to fill it in": "لم يُدخل سعر الوحدة — انقر مرتين أو اضغط F2 لإدخاله",
+    "Open Attachments to add the missing PR/PO document": "افتح المرفقات لإضافة مستند الشراء الناقص",
+    "Reorder the selected item(s)": "إعادة ترتيب البنود المحددة",
+    "Change fields, or find & replace text, across several selected items at once": "تعديل الحقول أو استبدال النص في البنود المحددة",
+    "Show only items where Unit Cost is 0 (or blank) — useful when filling in pricing data.": "عرض البنود التي لم يُدخل لها سعر وحدة فقط.",
+    "Show only items missing a PR and/or PO attachment — useful when chasing down documentation.": "عرض البنود التي ينقصها طلب أو أمر شراء فقط.",
+    "Ask the AI for a short plain-text status report for the selected scope": "إنشاء تقرير مختصر عن النطاق المحدد",
+    "Save the last AI reply above as a .txt file": "حفظ آخر رد للمساعد في ملف نصي",
+    "Send one quick test message to verify OPENROUTER_MODEL works before relying on it": "اختبار اتصال النموذج برسالة قصيرة",
+    "Conversations are saved locally per scope (a project, a Main Project group, or “All projects”) and reloaded automatically — the assistant also sees a short summary of recent changes for this scope.": "تُحفظ المحادثات محليًا لكل مشروع أو مجموعة أو جميع المشاريع، مع ملخص للتغييرات الأخيرة.",
+    "OpenRouter is not configured yet. Create a .env file next to main.py (copy .env.example) and set OPENROUTER_API_KEY. This uses OpenRouter's free-tier models, so it stays free for personal use.": "المساعد غير مهيأ. انسخ .env.example إلى .env بجانب التطبيق وأدخل مفتاح OPENROUTER_API_KEY.",
+    "Ctrl/Shift+Click to select multiple rows. Duplicate now inserts copies right next to the original. For long lists: Top/Bottom (Ctrl+Alt+↑/↓) or Move to… (Ctrl+G) jumps instantly instead of stepping through every row.": "حدد عدة صفوف باستخدام Ctrl أو Shift مع النقر. للتنقل السريع استخدم Ctrl+G، وللنقل إلى البداية أو النهاية استخدم Ctrl+Alt مع الأسهم.",
+    "<b>Export the currently selected project as a professional report.</b>": "<b>تصدير تقرير للمشروع الحالي.</b>",
+    "<b>Export filtered view</b> — use the search box / status / supplier filters on the Items tab to narrow the list down to what you want, then export exactly that.": "<b>تصدير العرض المصفّى</b> — استخدم البحث والفلاتر لتحديد البنود المطلوبة ثم صدّر النتائج.",
+}
+
+
+DISPLAY_AR.update({
+    "View matching items": "عرض البنود المطابقة",
+    "Fully delivered items: {done} of {total}": "البنود المسلمة بالكامل: {done} من {total}",
+    "No items in this scope yet.": "لا توجد بنود في هذا النطاق بعد.",
+    "Select a project in the tree to view its details and open its BOQ.": "اختر مشروعًا من الشجرة لعرض بياناته وفتح جدول بنوده.",
+    "Export this scope to Excel": "تصدير النطاق الحالي إلى Excel",
+    "{count} projects": "{count} مشاريع",
+    "Purchasing value": "القيمة الشرائية",
+    "Items": "البنود",
+    "Finishing background operations before closing…": "جارٍ إنهاء العمليات الجارية قبل إغلاق البرنامج…",
+    "Wait for background operations to finish before changing the data folder.": "انتظر انتهاء العمليات الجارية قبل تغيير مجلد البيانات.",
+})
+
+DISPLAY_AR.update({
+    'Users': 'المستخدمون',
+    'Users…': 'المستخدمون…',
+    'Sign in': 'تسجيل الدخول',
+    'Username': 'اسم المستخدم',
+    'Password': 'كلمة المرور',
+    'Confirm password': 'تأكيد كلمة المرور',
+    'Create manager account': 'إنشاء حساب المدير',
+    'Create the first manager account': 'إنشاء حساب المدير الأول',
+    'There are no accounts yet. Create the manager account to get started.': 'لا توجد حسابات بعد — أنشئ حساب المدير للبدء.',
+    'Exit': 'خروج',
+    'Wrong username or password.': 'اسم المستخدم أو كلمة المرور غير صحيحة.',
+    'Passwords do not match.': 'كلمتا المرور غير متطابقتين.',
+    'Please fill in all fields.': 'يرجى إكمال جميع الحقول.',
+    'Username already exists.': 'اسم المستخدم مستخدم بالفعل.',
+    'Username is required.': 'اسم المستخدم مطلوب.',
+    'Unknown role.': 'دور غير معروف.',
+    'Manager': 'مدير',
+    'Engineer': 'مهندس',
+    'Role': 'الدور',
+    'Active': 'نشط',
+    'Yes': 'نعم',
+    'No': 'لا',
+    'Display name': 'الاسم المعروض',
+    'Add User…': 'إضافة مستخدم…',
+    'Edit…': 'تعديل…',
+    'Set Password…': 'تعيين كلمة المرور…',
+    'New password': 'كلمة المرور الجديدة',
+    'Add User': 'إضافة مستخدم',
+    'Edit User': 'تعديل مستخدم',
+    'Set Password': 'تعيين كلمة المرور',
+    'At least one active manager is required.': 'يجب الإبقاء على مدير نشط واحد على الأقل.',
+    'Select a user first.': 'اختر مستخدمًا أولاً.',
+    'Accounts for this data folder. Engineers can edit only the projects assigned to them.': 'حسابات هذا المجلد. المهندس يعدّل فقط المشاريع المعيّنة له.',
+    'Only the manager can manage user accounts.': 'إدارة المستخدمين متاحة للمدير فقط.',
+    'Assigned engineer': 'المهندس المسؤول',
+    'Unassigned': 'غير معيّن',
+})
+
+DISPLAY_AR.update({
+    "View only": "عرض فقط", "Managers only": "للمدير فقط",
+    "This project is view-only for you - you can view it and export reports, but not change its data.": "هذا المشروع للعرض فقط بالنسبة لك - يمكنك مشاهدته وتصدير التقارير، لكن لا يمكنك تعديل بياناته.",
+    "Only the manager can do this.": "هذا الإجراء متاح للمدير فقط.",
+})
+
+DISPLAY_AR.update({
+    "Assign Projects…": "تعيين مشاريع…",
+    "Assign Projects": "تعيين المشاريع",
+    "Delete User": "حذف مستخدم",
+    "Tick the projects this account may edit.": "علّم على المشاريع اللي الحساب ده يقدر يعدلها.",
+    "You cannot delete the account you are signed in with.": "مينفعش تحذف الحساب اللي انت مسجل بيه الدخول.",
+    "Delete user {name}? Projects assigned to them will be unassigned.": "حذف المستخدم {name}؟ المشاريع المسندة له هتترجع من غير مسؤول.",
+    "User not found.": "المستخدم غير موجود.",
+})
+
+
+DISPLAY_AR.update({
+    "Skipped {count} item(s) because you do not have permission to edit their projects.":
+        "تم تخطي {count} بند لعدم امتلاكك صلاحية تعديل مشاريعها.",
+})
+
+
+def tr_text(text):
+    """Translate a display label, never a stored value or an identifier."""
+    text = text.lstrip("📤📥📄📊📁🔌🔄🎯🎉⚠✎✕↺↻⇞⇠🗑🕓🕒🕐🕑🕔🕕🕖🕗🕘🕙🕚🕛\ufe0f ").rstrip(" ▾")
+    if "\t" in text:
+        label, shortcut = text.split("\t", 1)
+        return tr_text(label) + "\t" + shortcut
+    if _current_lang != "ar":
+        return text
+    suffix = text[len(text.rstrip("*:")):]
+    if suffix:
+        return tr_text(text[:-len(suffix)]) + suffix
+    for entry in STRINGS.values():
+        if entry.get("en") == text:
+            return entry.get("ar", text)
+    return DISPLAY_AR.get(text, text)

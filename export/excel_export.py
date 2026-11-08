@@ -53,7 +53,7 @@ def export_project_to_excel(db, project_id, output_path, item_ids=None):
     wb = Workbook()
     ws = wb.active
     ws.title = "Material Tracker"
-    _write_project_sheet(ws, db, project, item_ids=item_ids)
+    _write_project_sheet(ws, db, project, item_ids=item_ids, output_path=output_path)
     wb.save(output_path)
     return output_path
 
@@ -74,7 +74,7 @@ def export_multiple_projects_to_excel(db, project_ids, output_path):
         title = _unique_sheet_title(project["name"], used_titles)
         used_titles.add(title)
         ws = wb.create_sheet(title=title)
-        _write_project_sheet(ws, db, project)
+        _write_project_sheet(ws, db, project, output_path=output_path)
 
     if not wb.sheetnames:
         wb.create_sheet(title="No Projects")
@@ -150,7 +150,7 @@ def export_items_for_cost_update(db, project_ids, output_path):
         for it in db.get_items(project_id):
             values = [
                 it["id"], project["name"], it["item_name"], it["pump_station"] or "",
-                it["supplier_name"] or "-", it["unit"] or "", it["currency"] or "-",
+                it["supplier_name"] or "-", it["unit"] or "", it["currency"] or project["currency"] or "-",
                 it["unit_cost"] or 0,
             ]
             for col, val in enumerate(values, start=1):
@@ -282,7 +282,7 @@ def export_projects_combined_to_excel(db, project_ids, output_path):
     return export_flat_items_to_excel(rows, output_path, sheet_title="Combined")
 
 
-def _write_project_sheet(ws, db, project, item_ids=None):
+def _write_project_sheet(ws, db, project, item_ids=None, output_path=None):
     """Writes one project's full report into an already-created
     worksheet — shared by both the single-project and multi-project
     (one-tab-per-project) export paths so their formatting never drifts
@@ -375,7 +375,7 @@ def _write_project_sheet(ws, db, project, item_ids=None):
         for doc_idx, category in enumerate(DOC_HEADERS):
             col = N_BASE + 1 + doc_idx
             files = [a for a in attachments if a["category"] == category]
-            _write_hyperlink_cell(ws, row, col, files)
+            _write_hyperlink_cell(ws, row, col, files, output_path)
 
         if over:
             for c in range(1, n_cols + 1):
@@ -424,7 +424,23 @@ def _write_project_sheet(ws, db, project, item_ids=None):
     ws.row_dimensions[group_row].height = 20
 
 
-def _write_hyperlink_cell(ws, row, col, files):
+def _attachment_link(file_path, output_path):
+    """Relative link when the workbook is saved inside the folder tree that
+    holds the attachments (so moving or sharing the whole data folder keeps
+    the links working); absolute otherwise."""
+    target = os.path.abspath(file_path)
+    if output_path:
+        base = os.path.dirname(os.path.abspath(output_path))
+        try:
+            rel = os.path.relpath(target, base)
+        except ValueError:  # different drive on Windows
+            return target
+        if not rel.startswith(".."):
+            return rel.replace("\\", "/")
+    return target
+
+
+def _write_hyperlink_cell(ws, row, col, files, output_path=None):
     if not files:
         ws.cell(row=row, column=col, value="-")
         return
@@ -432,6 +448,7 @@ def _write_hyperlink_cell(ws, row, col, files):
     cell = ws.cell(row=row, column=col)
     label = f"{len(files)} file(s)" if len(files) > 1 else "Open"
     cell.value = label
-    cell.hyperlink = os.path.abspath(first["file_path"])
+    if first["file_path"]:
+        cell.hyperlink = _attachment_link(first["file_path"], output_path)
     cell.font = Font(name=FONT_NAME, size=10, color="0563C1", underline="single")
 

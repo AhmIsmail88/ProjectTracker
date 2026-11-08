@@ -24,9 +24,12 @@ import re
 import sqlite3
 import os
 import shutil
+import threading
 import uuid
+import ntpath
 from datetime import datetime, timedelta
 from collections import defaultdict
+from contextlib import contextmanager
 
 from constants import (
     ATTACHMENT_CATEGORIES,
@@ -35,6 +38,7 @@ from constants import (
     compute_status, is_over_supplied, is_over_requested,
 )
 from app_paths import get_app_dir
+import auth
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +51,20 @@ _DEFAULT_ATTACHMENTS_DIR = os.path.join(_APP_DIR, "attachments")
 # either purely mechanical (last_updated always changes) or would just add
 # noise without helping anyone understand "what happened".
 _AUDIT_EXCLUDED_FIELDS = frozenset({"last_updated"})
+
+# Bump when a migration step is added to _migrate_schema. Stored in the
+# database file (PRAGMA user_version).
+SCHEMA_VERSION = 1
+
+# How long a write waits for another user's write to finish (seconds).
+LOCK_TIMEOUT_SECONDS = 30
+
+
+def is_database_busy_error(exc):
+    """True for SQLite's "database is locked / busy" errors - another user
+    or computer kept the file busy longer than LOCK_TIMEOUT_SECONDS."""
+    return isinstance(exc, sqlite3.OperationalError) and (
+        "locked" in str(exc).lower() or "busy" in str(exc).lower())
 
 
 def now_str():
@@ -67,6 +85,16 @@ def _safe_update(allowed_cols, fields):
         )
     cols_sql = ", ".join(f"{k} = ?" for k in safe)
     return cols_sql, list(safe.values()), safe
+
+
+def _same_value(old, new):
+    """True when writing *new* over *old* would not change anything real:
+    NULL and "" count as equal, and so do 5 and 5.0 / True and 1."""
+    if old in (None, "") and new in (None, ""):
+        return True
+    if isinstance(old, (int, float)) and isinstance(new, (int, float)):
+        return abs(float(old) - float(new)) < 1e-12
+    return old == new
 
 
 def _log_change(conn, entity_type, entity_id, entity_name, project_id,
@@ -115,17 +143,94 @@ class Database:
 
     def __init__(self, db_path=_DEFAULT_DB_PATH, attachments_dir=None):
         self.db_path = db_path
+        self._tx = threading.local()
         self.attachments_dir = attachments_dir or _DEFAULT_ATTACHMENTS_DIR
         os.makedirs(self.attachments_dir, exist_ok=True)
         logger.info("Database opened: %s", self.db_path)
         self._init_schema()
         self._migrate_schema()
+        self._migrate_attachment_paths()
 
-    def _connect(self):
-        conn = sqlite3.connect(self.db_path)
+    def _migrate_attachment_paths(self):
+        """Make legacy attachment paths portable, including restored Windows DBs."""
+        with self._connect() as conn:
+            for row in conn.execute("SELECT id, item_id, file_path FROM attachments").fetchall():
+                path = row["file_path"] or ""
+                if ntpath.isabs(path):
+                    parts = path.replace("\\", "/").split("/")
+                    if len(parts) >= 2 and parts[-2] == f"item_{row['item_id']}" and parts[-1] not in ("", ".", ".."):
+                        conn.execute("UPDATE attachments SET file_path = ? WHERE id = ?",
+                                     (f"{parts[-2]}/{parts[-1]}", row["id"]))
+
+    def resolve_attachment_path(self, stored_path):
+        """Resolve only files inside this database's attachment root."""
+        root = os.path.realpath(self.attachments_dir)
+        if not stored_path or ntpath.isabs(stored_path):
+            raise ValueError("Attachment path must be relative to the data folder")
+        path = os.path.realpath(os.path.join(root, stored_path.replace("\\", "/")))
+        if os.path.commonpath([root, path]) != root or path == root:
+            raise ValueError("Attachment path escapes the data folder")
+        return path
+
+    def _resolved_attachments(self, rows):
+        result = []
+        for row in rows:
+            attachment = dict(row)
+            try:
+                attachment["file_path"] = self.resolve_attachment_path(row["file_path"])
+            except ValueError:
+                logger.warning("Ignoring unsafe attachment path for id=%s", row["id"])
+                attachment["file_path"] = ""
+            result.append(attachment)
+        return result
+
+    def _open_connection(self):
+        # Wait up to LOCK_TIMEOUT_SECONDS for another computer/user to finish
+        # its write instead of failing at once with "database is locked"
+        # (Python's default is 5 s). WAL mode is deliberately NOT used: it
+        # is unsafe when the data folder is on a network/shared drive.
+        conn = sqlite3.connect(self.db_path, timeout=LOCK_TIMEOUT_SECONDS)
         conn.execute("PRAGMA foreign_keys = ON")
         conn.row_factory = sqlite3.Row
         return conn
+
+    @contextmanager
+    def _connect(self):
+        # Inside transaction() every call on this thread shares one
+        # connection, so nothing is committed until the whole batch is done.
+        shared = getattr(getattr(self, "_tx", None), "conn", None)
+        if shared is not None:
+            yield shared
+            return
+        conn = self._open_connection()
+        try:
+            with conn:
+                yield conn
+        finally:
+            conn.close()
+
+    @contextmanager
+    def transaction(self):
+        """All-or-nothing block: every write made through this Database on
+        the current thread inside the block commits together at the end, or
+        is rolled back entirely if anything raises. Used for imports and
+        bulk edits, so a failure half-way never leaves half the rows
+        changed. Nesting is allowed (inner blocks join the outer one).
+        The connection is per-thread, so a background import never shares
+        a connection with the UI thread."""
+        if getattr(self, "_tx", None) is None:
+            self._tx = threading.local()
+        if getattr(self._tx, "conn", None) is not None:
+            yield
+            return
+        conn = self._open_connection()
+        self._tx.conn = conn
+        try:
+            with conn:
+                yield
+        finally:
+            self._tx.conn = None
+            conn.close()
 
     def _init_schema(self):
         with self._connect() as conn:
@@ -177,6 +282,17 @@ class Database:
                     original_name TEXT,
                     uploaded_date TEXT,
                     FOREIGN KEY (item_id) REFERENCES items (id) ON DELETE CASCADE
+                );
+
+                CREATE TABLE IF NOT EXISTS users (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    username TEXT NOT NULL,
+                    password_hash TEXT NOT NULL,
+                    salt TEXT NOT NULL,
+                    role TEXT NOT NULL DEFAULT 'user',
+                    display_name TEXT,
+                    is_active INTEGER DEFAULT 1,
+                    created_date TEXT
                 );
 
                 CREATE TABLE IF NOT EXISTS audit_log (
@@ -246,6 +362,7 @@ class Database:
                 ("deleted_at", "TEXT"),
                 ("project_group", "TEXT"),
                 ("group_id", "INTEGER"),
+                ("assigned_user_id", "INTEGER"),
             ],
             "suppliers": [
                 ("is_deleted", "INTEGER DEFAULT 0"),
@@ -257,6 +374,7 @@ class Database:
                 ("manual_hold", "INTEGER DEFAULT 0"),
                 ("po_issued", "INTEGER DEFAULT 0"),
                 ("variance_note", "TEXT"),
+                ("deleted_with_project", "INTEGER"),
                 ("is_deleted", "INTEGER DEFAULT 0"),
                 ("deleted_at", "TEXT"),
             ],
@@ -282,6 +400,7 @@ class Database:
             # CREATE TABLE IF NOT EXISTS, a no-op on an already-existing
             # older table) would fail with "no such column".
             conn.execute("CREATE INDEX IF NOT EXISTS idx_chat_scope_group ON ai_chat_history(scope_group_id)")
+            conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_username ON users(lower(username))")
 
             # One-time backfill: turn the old free-text "project_group" tag
             # into a real project_groups row + group_id foreign key, so
@@ -335,24 +454,34 @@ class Database:
             for pid in project_ids:
                 self._compact_sort_order(conn, pid)
 
+            # Record the schema generation inside the file itself, so a
+            # future migration can tell exactly which steps already ran
+            # (PRAGMA user_version is stored in the database header).
+            if conn.execute("PRAGMA user_version").fetchone()[0] < SCHEMA_VERSION:
+                conn.execute(f"PRAGMA user_version = {int(SCHEMA_VERSION)}")
+                logger.info("Database schema version set to %d", SCHEMA_VERSION)
+
     # ------------------------------------------------------------------ #
     #  Internal helpers for cleaning up attachment files on disk
     # ------------------------------------------------------------------ #
     def _collect_attachment_paths(self, conn, where_clause, params):
         rows = conn.execute(
-            f"SELECT file_path FROM attachments WHERE {where_clause}",
+            f"SELECT id, file_path FROM attachments WHERE {where_clause}",
             params,
         ).fetchall()
-        return [r["file_path"] for r in rows]
+        return [r["file_path"] for r in self._resolved_attachments(rows) if r["file_path"]]
 
-    @staticmethod
-    def _remove_files(paths):
+    def _remove_files(self, paths):
         for p in paths:
             try:
+                root = os.path.realpath(self.attachments_dir)
+                if os.path.commonpath([root, os.path.realpath(p)]) != root:
+                    logger.warning("Refusing to remove attachment outside data folder")
+                    continue
                 if os.path.exists(p):
                     os.remove(p)
                     logger.debug("Removed attachment file: %s", p)
-            except OSError as exc:
+            except (OSError, ValueError) as exc:
                 logger.warning("Could not remove attachment file %s: %s", p, exc)
 
     # ---------------- Projects ----------------
@@ -378,6 +507,8 @@ class Database:
         entity_name = safe_fields.get("name", current["name"] if current else None)
         with self._connect() as conn:
             conn.execute(f"UPDATE projects SET {cols_sql} WHERE id = ?", values)
+            if "group_id" in safe_fields:
+                conn.execute("UPDATE projects SET project_group = NULL WHERE id = ?", (project_id,))
             _log_field_diffs(conn, "project", project_id, entity_name, project_id, current, safe_fields)
         logger.info("Updated project id=%d fields=%s", project_id, set(fields))
 
@@ -385,17 +516,18 @@ class Database:
         """Soft delete: the project (and its items/attachments) is hidden
         but not destroyed, so it can be restored via undo/trash."""
         project = self.get_project(project_id)
+        if project is None or project["is_deleted"]:
+            return
         deleted_at = now_str()
         with self._connect() as conn:
             conn.execute(
                 "UPDATE projects SET is_deleted = 1, deleted_at = ? WHERE id = ?",
                 (deleted_at, project_id),
             )
-            # Only items that were still active get the project's timestamp;
-            # an item individually deleted earlier keeps its own older
-            # deleted_at, so restoring the project will not resurrect it.
+            # Record deletion provenance explicitly: timestamps can collide
+            # when an item and its project are deleted in the same second.
             conn.execute(
-                "UPDATE items SET is_deleted = 1, deleted_at = ? "
+                "UPDATE items SET is_deleted = 1, deleted_at = ?, deleted_with_project = 1 "
                 "WHERE project_id = ? AND is_deleted = 0",
                 (deleted_at, project_id),
             )
@@ -409,15 +541,17 @@ class Database:
             deleted_at = row["deleted_at"] if row else None
             conn.execute("UPDATE projects SET is_deleted = 0, deleted_at = NULL WHERE id = ?", (project_id,))
             if deleted_at:
-                # Restore only the items that were deleted together with the
-                # project itself. An item individually deleted before the
-                # project deletion keeps its own, older deleted_at and stays
-                # in the trash where the user left it.
+                # NULL provenance is only for legacy records, where the
+                # original timestamp-based restoration remains the fallback.
                 conn.execute(
-                    "UPDATE items SET is_deleted = 0, deleted_at = NULL "
-                    "WHERE project_id = ? AND is_deleted = 1 AND deleted_at = ?",
+                    "UPDATE items SET is_deleted = 0, deleted_at = NULL, deleted_with_project = 0 "
+                    "WHERE project_id = ? AND is_deleted = 1 AND "
+                    "(deleted_with_project = 1 OR (deleted_with_project IS NULL AND deleted_at = ?))",
                     (project_id, deleted_at),
                 )
+                # An item deleted on its own earlier and tied to the project
+                # by restore_item may carry a stale number; renumber cleanly.
+                self._compact_sort_order(conn, project_id)
             _log_change(conn, "project", project_id, project["name"] if project else None, project_id, "restored")
         logger.info("Restored project id=%d", project_id)
 
@@ -504,7 +638,7 @@ class Database:
         """Deletes the group itself and ungroups its member projects
         (they keep all their data — only group_id is cleared)."""
         with self._connect() as conn:
-            conn.execute("UPDATE projects SET group_id = NULL WHERE group_id = ?", (group_id,))
+            conn.execute("UPDATE projects SET group_id = NULL, project_group = NULL WHERE group_id = ?", (group_id,))
             conn.execute("DELETE FROM project_groups WHERE id = ?", (group_id,))
         logger.info("Deleted project group id=%d (member projects ungrouped, not deleted)", group_id)
 
@@ -577,7 +711,7 @@ class Database:
 
                 value = total * (item["unit_cost"] or 0)
                 if value:
-                    currency = item["currency"] or "(no currency set)"
+                    currency = item["currency"] or project["currency"] or "(no currency set)"
                     bucket["values"][currency] = bucket["values"].get(currency, 0) + value
 
         rows = []
@@ -800,6 +934,137 @@ class Database:
                 return conn.execute("SELECT * FROM suppliers WHERE is_deleted = 1 ORDER BY deleted_at DESC").fetchall()
             return conn.execute("SELECT * FROM suppliers WHERE is_deleted = 0 ORDER BY name").fetchall()
 
+    # ------------------------------------------------------------------ #
+    # User accounts (multi-user support: accounts + project assignment)
+    # ------------------------------------------------------------------ #
+    def add_user(self, username, password, role="user", display_name="", is_active=True):
+        username = (username or "").strip()
+        if not username:
+            raise ValueError("Username is required.")
+        if role not in ("manager", "user"):
+            raise ValueError("Unknown role.")
+        salt, password_hash = auth.hash_password(password)
+        with self._connect() as conn:
+            existing = conn.execute(
+                "SELECT id FROM users WHERE lower(username) = lower(?)", (username,)
+            ).fetchone()
+            if existing:
+                raise ValueError("Username already exists.")
+            cur = conn.execute(
+                "INSERT INTO users (username, password_hash, salt, role, display_name, is_active, created_date) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (username, password_hash, salt, role, display_name or "", int(bool(is_active)), now_str()),
+            )
+            new_id = cur.lastrowid
+            _log_change(conn, "user", new_id, username, None, "created")
+        logger.info("Added user id=%s name=%r role=%s", new_id, username, role)
+        return new_id
+
+    def count_users(self):
+        with self._connect() as conn:
+            return conn.execute("SELECT COUNT(*) AS n FROM users").fetchone()["n"]
+
+    def list_users(self, active_only=False):
+        query = "SELECT * FROM users"
+        if active_only:
+            query += " WHERE is_active = 1"
+        query += " ORDER BY CASE role WHEN 'manager' THEN 0 ELSE 1 END, lower(username)"
+        with self._connect() as conn:
+            return conn.execute(query).fetchall()
+
+    def get_user(self, user_id):
+        with self._connect() as conn:
+            return conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+
+    def get_user_by_username(self, username):
+        with self._connect() as conn:
+            return conn.execute(
+                "SELECT * FROM users WHERE lower(username) = lower(?)", ((username or "").strip(),)
+            ).fetchone()
+
+    def update_user(self, user_id, **fields):
+        allowed = {"username", "role", "display_name", "is_active"}
+        safe = {k: v for k, v in fields.items() if k in allowed}
+        if not safe:
+            return
+        if "role" in safe and safe["role"] not in ("manager", "user"):
+            raise ValueError("Unknown role.")
+        current = self.get_user(user_id)
+        if current is None:
+            return
+        if "username" in safe:
+            safe["username"] = str(safe["username"]).strip()
+            if not safe["username"]:
+                raise ValueError("Username is required.")
+        cols_sql = ", ".join(f"{k} = ?" for k in safe)
+        values = list(safe.values()) + [user_id]
+        with self._connect() as conn:
+            if "username" in safe:
+                clash = conn.execute(
+                    "SELECT id FROM users WHERE lower(username) = lower(?) AND id != ?",
+                    (safe["username"], user_id),
+                ).fetchone()
+                if clash:
+                    raise ValueError("Username already exists.")
+            conn.execute(f"UPDATE users SET {cols_sql} WHERE id = ?", values)
+            _log_change(conn, "user", user_id, safe.get("username", current["username"]), None, "updated")
+        logger.info("Updated user id=%d fields=%s", user_id, set(safe))
+
+    def set_password(self, user_id, password):
+        salt, password_hash = auth.hash_password(password)
+        current = self.get_user(user_id)
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE users SET password_hash = ?, salt = ? WHERE id = ?",
+                (password_hash, salt, user_id),
+            )
+            _log_change(conn, "user", user_id, current["username"] if current else None, None, "password")
+        logger.info("Password changed for user id=%d", user_id)
+
+    def verify_user(self, username, password):
+        user = self.get_user_by_username(username)
+        if user is None or not user["is_active"]:
+            return None
+        if auth.verify_password(password, user["salt"], user["password_hash"]):
+            return user
+        return None
+
+    def set_project_assignee(self, project_id, user_id):
+        with self._connect() as conn:
+            conn.execute("UPDATE projects SET assigned_user_id = ? WHERE id = ?", (user_id, project_id))
+        logger.info("Project id=%s assigned to user id=%s", project_id, user_id)
+
+    def assign_projects_to_user(self, user_id, project_ids):
+        """Replace this user's project assignments with the given ids."""
+        ids = [int(pid) for pid in project_ids]
+        with self._connect() as conn:
+            conn.execute("UPDATE projects SET assigned_user_id = NULL WHERE assigned_user_id = ?",
+                         (user_id,))
+            if ids:
+                conn.executemany(
+                    "UPDATE projects SET assigned_user_id = ? WHERE id = ?",
+                    [(user_id, pid) for pid in ids],
+                )
+        logger.info("User id=%s now owns %s project(s)", user_id, len(ids))
+
+    def delete_user(self, user_id):
+        """Delete an account and return its projects to the unassigned pool."""
+        with self._connect() as conn:
+            row = conn.execute("SELECT id, role, is_active FROM users WHERE id = ?",
+                               (user_id,)).fetchone()
+            if row is None:
+                raise ValueError("User not found.")
+            if row["role"] == "manager" and row["is_active"]:
+                active_managers = conn.execute(
+                    "SELECT COUNT(*) AS n FROM users WHERE role = 'manager' AND is_active = 1"
+                ).fetchone()["n"]
+                if active_managers <= 1:
+                    raise ValueError("At least one active manager is required.")
+            conn.execute("UPDATE projects SET assigned_user_id = NULL WHERE assigned_user_id = ?",
+                         (user_id,))
+            conn.execute("DELETE FROM users WHERE id = ?", (user_id,))
+        logger.info("Deleted user id=%s", user_id)
+
     # ---------------- Items ----------------
     def _next_sort_order(self, conn, project_id):
         # Only ACTIVE items count: a soft-deleted item keeps its stale
@@ -886,6 +1151,18 @@ class Database:
         # Recompute status server-side whenever quantities/flags change, so
         # the UI never needs to (and can never fall out of sync).
         current = self.get_item(item_id)
+        if current is None:
+            raise ValueError(f"Item {item_id} does not exist.")
+        # A write that changes nothing must not touch the row: last_updated
+        # drives the Dashboard's "stale / possibly forgotten" list, so
+        # re-saving identical values (e.g. re-importing a cost sheet that
+        # still holds the current prices) would wrongly reset it.
+        if not any(
+            key in ALLOWED_ITEM_COLS and key not in ("status", "last_updated")
+            and not _same_value(current[key], value)
+            for key, value in fields.items()
+        ):
+            return
         total_qty = fields.get("total_quantity", current["total_quantity"])
         requested_qty = fields.get("requested_quantity", current["requested_quantity"])
         delivered_qty = fields.get("delivered_quantity", current["delivered_quantity"])
@@ -895,8 +1172,8 @@ class Database:
         fields["last_updated"] = now_str()
         cols_sql, values, safe_fields = _safe_update(ALLOWED_ITEM_COLS, fields)
         values.append(item_id)
-        entity_name = safe_fields.get("item_name", current["item_name"] if current else None)
-        project_id = current["project_id"] if current else None
+        entity_name = safe_fields.get("item_name", current["item_name"])
+        project_id = current["project_id"]
         with self._connect() as conn:
             conn.execute(f"UPDATE items SET {cols_sql} WHERE id = ?", values)
             _log_field_diffs(conn, "item", item_id, entity_name, project_id, current, safe_fields)
@@ -907,17 +1184,20 @@ class Database:
         1..N sequence with no gaps. Called after any delete so the visible
         '#' column never shows jumps like 39, 42, 43 after 40/41 are gone."""
         rows = conn.execute(
-            "SELECT id FROM items WHERE project_id = ? AND is_deleted = 0 ORDER BY sort_order, id",
+            "SELECT id, sort_order FROM items WHERE project_id = ? AND is_deleted = 0 ORDER BY sort_order, id",
             (project_id,),
         ).fetchall()
+        # Only rows whose number actually changes are written, so the
+        # startup check on an already-clean database writes nothing.
         for idx, r in enumerate(rows, start=1):
-            conn.execute("UPDATE items SET sort_order = ? WHERE id = ?", (idx, r["id"]))
+            if r["sort_order"] != idx:
+                conn.execute("UPDATE items SET sort_order = ? WHERE id = ?", (idx, r["id"]))
 
     def delete_item(self, item_id):
         item = self.get_item(item_id)
         with self._connect() as conn:
             conn.execute(
-                "UPDATE items SET is_deleted = 1, deleted_at = ? WHERE id = ?",
+                "UPDATE items SET is_deleted = 1, deleted_at = ?, deleted_with_project = 0 WHERE id = ?",
                 (now_str(), item_id),
             )
             _log_change(conn, "item", item_id, item["item_name"] if item else None,
@@ -928,18 +1208,34 @@ class Database:
 
     def restore_item(self, item_id):
         item = self.get_item(item_id)
+        if item is None:
+            # Purged meanwhile (e.g. "Delete Forever" before Undo): nothing
+            # left to restore, and nothing to crash on.
+            logger.warning("restore_item: item id=%s no longer exists", item_id)
+            return False
+        project = self.get_project(item["project_id"])
+        if project is not None and project["is_deleted"]:
+            # Restoring it now would make it "active" inside a project nobody
+            # can see. Instead tie it to the project: it comes back together
+            # with the project when that is restored from the trash.
+            with self._connect() as conn:
+                conn.execute("UPDATE items SET deleted_with_project = 1 WHERE id = ?", (item_id,))
+            logger.info("restore_item: item id=%s will return with project id=%s",
+                        item_id, item["project_id"])
+            return False
         with self._connect() as conn:
             # Put the restored item at the end of the current sequence
             # rather than its old sort_order, which may now collide with
             # (or be stale relative to) the already-compacted numbering.
             new_order = self._next_sort_order(conn, item["project_id"]) if item else None
             conn.execute(
-                "UPDATE items SET is_deleted = 0, deleted_at = NULL, sort_order = COALESCE(?, sort_order) WHERE id = ?",
+                "UPDATE items SET is_deleted = 0, deleted_at = NULL, deleted_with_project = 0, sort_order = COALESCE(?, sort_order) WHERE id = ?",
                 (new_order, item_id),
             )
             _log_change(conn, "item", item_id, item["item_name"] if item else None,
                        item["project_id"] if item else None, "restored")
         logger.info("Restored item id=%d", item_id)
+        return True
 
     def purge_item(self, item_id):
         item = self.get_item(item_id)
@@ -1051,37 +1347,38 @@ class Database:
         os.makedirs(item_folder, exist_ok=True)
         original_name = os.path.basename(source_file_path)
         unique_name = f"{uuid.uuid4().hex[:8]}_{original_name}"
-        dest_path = os.path.join(item_folder, unique_name)
+        dest_path = self.resolve_attachment_path(f"item_{item_id}/{unique_name}")
         shutil.copy2(source_file_path, dest_path)
         with self._connect() as conn:
             conn.execute(
                 "INSERT INTO attachments (item_id, category, file_path, original_name, uploaded_date) "
                 "VALUES (?, ?, ?, ?, ?)",
-                (item_id, category, dest_path, original_name, now_str()),
+                (item_id, category, os.path.relpath(dest_path, self.attachments_dir).replace("\\", "/"), original_name, now_str()),
             )
+            self._log_attachment(conn, item_id, "attachment_added", category, original_name)
         logger.info("Attached %r (%s) to item=%d", original_name, category, item_id)
         return dest_path
 
     def get_attachments(self, item_id, category=None):
         with self._connect() as conn:
             if category:
-                return conn.execute(
+                return self._resolved_attachments(conn.execute(
                     "SELECT * FROM attachments WHERE item_id = ? AND category = ? AND is_deleted = 0 ORDER BY id",
                     (item_id, category),
-                ).fetchall()
-            return conn.execute(
+                ).fetchall())
+            return self._resolved_attachments(conn.execute(
                 "SELECT * FROM attachments WHERE item_id = ? AND is_deleted = 0 ORDER BY category, id", (item_id,)
-            ).fetchall()
+            ).fetchall())
 
     def get_all_attachments_for_project(self, project_id):
         with self._connect() as conn:
-            return conn.execute(
+            return self._resolved_attachments(conn.execute(
                 """SELECT a.* FROM attachments a
                    JOIN items i ON a.item_id = i.id
                    WHERE i.project_id = ? AND a.is_deleted = 0 AND i.is_deleted = 0
                    ORDER BY a.item_id, a.category, a.id""",
                 (project_id,),
-            ).fetchall()
+            ).fetchall())
 
     def get_item_attachment_categories(self, project_id):
         """{item_id: set(category names)} for every item in the project
@@ -1093,17 +1390,38 @@ class Database:
             by_item[a["item_id"]].add(a["category"])
         return dict(by_item)
 
+    def _log_attachment(self, conn, item_id, action, category, original_name):
+        """Attachment changes go into the ITEM's history (entity 'item'),
+        so they show in the item's History and the project's Activity."""
+        item = conn.execute("SELECT item_name, project_id FROM items WHERE id = ?", (item_id,)).fetchone()
+        _log_change(conn, "item", item_id, item["item_name"] if item else None,
+                    item["project_id"] if item else None, action,
+                    field=category, new_value=original_name)
+
+    def _attachment_row(self, conn, attachment_id):
+        return conn.execute(
+            "SELECT item_id, category, original_name FROM attachments WHERE id = ?", (attachment_id,)
+        ).fetchone()
+
     def delete_attachment(self, attachment_id):
         with self._connect() as conn:
             conn.execute(
                 "UPDATE attachments SET is_deleted = 1, deleted_at = ? WHERE id = ?",
                 (now_str(), attachment_id),
             )
+            row = self._attachment_row(conn, attachment_id)
+            if row is not None:
+                self._log_attachment(conn, row["item_id"], "attachment_deleted",
+                                     row["category"], row["original_name"])
         logger.info("Soft-deleted attachment id=%d", attachment_id)
 
     def restore_attachment(self, attachment_id):
         with self._connect() as conn:
             conn.execute("UPDATE attachments SET is_deleted = 0, deleted_at = NULL WHERE id = ?", (attachment_id,))
+            row = self._attachment_row(conn, attachment_id)
+            if row is not None:
+                self._log_attachment(conn, row["item_id"], "attachment_restored",
+                                     row["category"], row["original_name"])
         logger.info("Restored attachment id=%d", attachment_id)
 
     # ---------------- Trash / housekeeping ----------------
@@ -1124,6 +1442,48 @@ class Database:
         for pid in proj_ids:
             self.purge_project(pid)
         return len(proj_ids)
+
+    @staticmethod
+    def _deleted_before(deleted_at, cutoff):
+        if cutoff is None:
+            return True
+        try:
+            return datetime.strptime(deleted_at, "%Y-%m-%d %H:%M:%S") < cutoff
+        except (TypeError, ValueError):
+            return False  # unknown age: keep it
+
+    def trash_summary(self, older_than_days=None):
+        """What empty_trash_items_and_projects would remove: counts of
+        trashed projects (with their items) and of items deleted one by one
+        from projects that are still active."""
+        cutoff = None if older_than_days is None else datetime.now() - timedelta(days=older_than_days)
+        with self._connect() as conn:
+            projects = [r for r in conn.execute("SELECT id, deleted_at FROM projects WHERE is_deleted = 1")
+                        if self._deleted_before(r["deleted_at"], cutoff)]
+            project_ids = [r["id"] for r in projects]
+            items_in_projects = 0
+            if project_ids:
+                marks = ", ".join("?" for _ in project_ids)
+                items_in_projects = conn.execute(
+                    f"SELECT COUNT(*) FROM items WHERE project_id IN ({marks})", project_ids
+                ).fetchone()[0]
+            loose = [r["id"] for r in conn.execute(
+                "SELECT i.id, i.deleted_at FROM items i JOIN projects p ON p.id = i.project_id "
+                "WHERE i.is_deleted = 1 AND p.is_deleted = 0")
+                if self._deleted_before(r["deleted_at"], cutoff)]
+        return {"project_ids": project_ids, "projects": len(project_ids),
+                "items_in_projects": items_in_projects,
+                "loose_item_ids": loose, "loose_items": len(loose)}
+
+    def empty_trash_items_and_projects(self, older_than_days=None):
+        """Permanently removes what trash_summary() reports. Returns that
+        summary. The caller is expected to take a backup first."""
+        summary = self.trash_summary(older_than_days)
+        for item_id in summary["loose_item_ids"]:
+            self.purge_item(item_id)
+        for project_id in summary["project_ids"]:
+            self.purge_project(project_id)
+        return summary
 
     # ---------------- Activity / audit log ----------------
     def get_activity(self, project_id=None, entity_type=None, entity_id=None, limit=300):
@@ -1201,9 +1561,11 @@ class Database:
         """Applies the same field value(s) to several items at once (e.g.
         the same supplier across 40 items) — a thin loop over
         update_item, so status recompute and per-item audit logging stay
-        identical to editing one item normally, just repeated."""
-        for item_id in item_ids:
-            self.update_item(item_id, **fields)
+        identical to editing one item normally, just repeated. All-or-nothing:
+        if one item fails, none of them is changed."""
+        with self.transaction():
+            for item_id in item_ids:
+                self.update_item(item_id, **dict(fields))
 
     BULK_REPLACE_FIELDS = [
         ("item_name", "Item Name"),
@@ -1247,17 +1609,18 @@ class Database:
         pattern = re.compile(re.escape(find_text), flags)
 
         updated = 0
-        for item_id in item_ids:
-            item = self.get_item(item_id)
-            if item is None:
-                continue
-            current = item[field] or ""
-            if not pattern.search(current):
-                continue
-            new_value = pattern.sub(lambda m: replace_text, current)
-            if new_value != current:
-                self.update_item(item_id, **{field: new_value})
-                updated += 1
+        with self.transaction():  # all-or-nothing across every item
+            for item_id in item_ids:
+                item = self.get_item(item_id)
+                if item is None:
+                    continue
+                current = item[field] or ""
+                if not pattern.search(current):
+                    continue
+                new_value = pattern.sub(lambda m: replace_text, current)
+                if new_value != current:
+                    self.update_item(item_id, **{field: new_value})
+                    updated += 1
         return updated
 
     SEARCHABLE_ITEM_FIELDS = [
@@ -1384,7 +1747,7 @@ class Database:
             for it in items_by_project.get(project["id"], []):
                 total_items += 1
                 status_counts[it["status"]] += 1
-                value_by_currency[it["currency"] or "?"] += (it["total_quantity"] or 0) * (it["unit_cost"] or 0)
+                value_by_currency[it["currency"] or project["currency"] or "?"] += (it["total_quantity"] or 0) * (it["unit_cost"] or 0)
                 if not it["unit_cost"]:
                     missing_cost_count += 1
                 if it["status"] == "Not requested" and it["last_updated"]:

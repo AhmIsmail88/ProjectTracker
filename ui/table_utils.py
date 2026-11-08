@@ -17,10 +17,25 @@ class ExportWorker(QThread):
     (many items/attachments/projects) don't freeze the window."""
     finished_ok = Signal()
     finished_err = Signal(str)
+    _active = set()
 
     def __init__(self, fn):
         super().__init__()
         self.fn = fn
+        self.finished.connect(self._release)
+
+    def start(self, *args):
+        # Result signals can arrive before run() returns. Keep a strong
+        # reference until QThread.finished, even if an owner clears its slot.
+        self._active.add(self)
+        super().start(*args)
+
+    def _release(self):
+        self._active.discard(self)
+
+    @classmethod
+    def active_workers(cls):
+        return [worker for worker in cls._active if worker.isRunning()]
 
     def run(self):
         try:
@@ -47,7 +62,11 @@ class EmptyStateTable(QTableWidget):
         super().paintEvent(event)
         if self.rowCount() == 0:
             painter = QPainter(self.viewport())
-            painter.setPen(self.palette().color(self.foregroundRole()).lighter(160))
+            from constants import get_theme
+            from ui.styles import DARK_TOKENS, LIGHT_TOKENS
+            from PySide6.QtGui import QColor
+            tokens = DARK_TOKENS if get_theme() == "dark" else LIGHT_TOKENS
+            painter.setPen(QColor(tokens["muted"]))
             painter.drawText(self.viewport().rect(), Qt.AlignCenter, self._empty_text)
             painter.end()
 
@@ -181,14 +200,22 @@ def configure_interactive_table(table, first_col_width=260, allow_row_drag=False
 
         def _persist():
             state_b64 = bytes(h_header.saveState().toBase64()).decode("ascii")
-            app_config.save_table_layout(layout_key, state_b64)
+            app_config.save_table_layout(layout_key, state_b64, scale=table.property("interfaceScale") or 1.0)
 
         save_timer.timeout.connect(_persist)
         h_header.sectionMoved.connect(lambda *_args: save_timer.start())
         h_header.sectionResized.connect(lambda *_args: save_timer.start())
 
     if table.columnCount() > 0 and not (layout_key and app_config.load_table_layout(layout_key)):
+        for col in range(table.columnCount()):
+            heading = table.horizontalHeaderItem(col)
+            if heading:
+                table.setColumnWidth(col, max(110, table.fontMetrics().horizontalAdvance(heading.text()) + 36))
         table.setColumnWidth(0, first_col_width)
+    for col in range(table.columnCount()):
+        heading = table.horizontalHeaderItem(col)
+        if heading:
+            heading.setToolTip(heading.text())
 
 
 def restore_table_layout(table, layout_key):
@@ -201,7 +228,9 @@ def restore_table_layout(table, layout_key):
         return False
     try:
         state = QByteArray.fromBase64(saved.encode("ascii"))
-        table.horizontalHeader().restoreState(state)
+        if not table.horizontalHeader().restoreState(state):
+            return False
+        table.setProperty("interfaceScale", app_config.load_table_layout_scale(layout_key))
     except Exception:
         return False
     return True

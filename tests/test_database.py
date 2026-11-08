@@ -411,7 +411,7 @@ class TestChatHistoryAndDashboard(unittest.TestCase):
         self.assertEqual(summary["missing_cost_count"], 2)
         self.assertEqual(summary["status_counts"]["Not requested"], 3)
         self.assertAlmostEqual(summary["value_by_currency"]["SAR"], 20.0)
-        self.assertAlmostEqual(summary["value_by_currency"]["?"], 0.0)
+        self.assertNotIn("?", summary["value_by_currency"])
 
     def test_dashboard_stale_items(self):
         pid = self.db.add_project("P")

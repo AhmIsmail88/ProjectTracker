@@ -15,7 +15,7 @@ from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 
-from PySide6.QtCore import QDate, QPointF, QRectF, Qt, Signal
+from PySide6.QtCore import QDate, QEvent, QPoint, QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import QBrush, QColor, QFont, QFontMetrics, QPainter, QPen, QPolygonF
 from PySide6.QtWidgets import (
     QFileDialog, QFrame, QHBoxLayout, QLabel, QMessageBox, QPushButton,
@@ -24,9 +24,11 @@ from PySide6.QtWidgets import (
 
 import constants
 import i18n
+import auth
 from constants import schedule_colors
 from i18n import tr
 from ui.dialogs import ScheduleActivityDialog
+from ui.project_picker import ProjectPicker
 
 
 def _parse_date(text):
@@ -136,7 +138,7 @@ def paint_month_bands(painter, width, height, start, end, name_width, rtl, lang,
     if start is None or end is None:
         return
     colors = schedule_colors(constants.get_theme())
-    total_days = max(1, (end - start).days)
+    total_days = max(1, (end - start).days + 1)
     timeline_width = max(1.0, width - name_width)
 
     def band_x(day):
@@ -162,6 +164,8 @@ def paint_month_bands(painter, width, height, start, end, name_width, rtl, lang,
         if right - left < 1:
             continue
         painter.fillRect(QRectF(left, 0, right - left, height), QColor(colors["grid"]))
+        painter.setPen(QColor(colors["accent_tint"]))
+        painter.drawLine(QPointF(x1, 0), QPointF(x1, height))
         if with_labels:
             painter.setPen(QColor(colors["text"]))
             painter.drawText(QRectF(left, 0, right - left, height), Qt.AlignCenter,
@@ -178,7 +182,7 @@ class TimelineHeader(QWidget):
         self._name_width = 300
         self._rtl = False
         self._lang = "ar"
-        self.setFixedHeight(26)
+        self.setFixedHeight(32)
 
     def set_model(self, start, end, name_width, rtl, lang):
         self._start, self._end = start, end
@@ -187,11 +191,58 @@ class TimelineHeader(QWidget):
 
     def paintEvent(self, _event):
         painter = QPainter(self)
-        painter.fillRect(self.rect(), self.palette().window())
+        colors = schedule_colors(constants.get_theme())
+        painter.fillRect(self.rect(), QColor(colors["panel"]))
         paint_month_bands(painter, self.width(), self.height(), self._start,
                           self._end, self._name_width, self._rtl, self._lang,
                           with_labels=True)
+        painter.setPen(QColor(colors["text"]))
+        painter.drawText(QRectF(10, 0, self._name_width - 24, self.height()),
+                         Qt.AlignVCenter | (Qt.AlignRight if self._rtl else Qt.AlignLeft),
+                         tr("schedule_col_activity"))
+        painter.setPen(QColor(colors["accent_tint"]))
+        painter.drawLine(0, self.height() - 1, self.width(), self.height() - 1)
         painter.end()
+
+
+class TimelineScrollArea(QScrollArea):
+    """Keep the month scale visible and aligned with the scrolling canvas."""
+
+    def __init__(self, timeline, header, parent=None):
+        super().__init__(parent)
+        self._header_clip = QWidget(self)
+        self.header = header
+        header.setParent(self._header_clip)
+        self.setFrameShape(QFrame.NoFrame)
+        self.setWidgetResizable(True)
+        self.setViewportMargins(0, header.height(), 0, 0)
+        self.setWidget(timeline)
+        timeline.installEventFilter(self)
+        self.viewport().installEventFilter(self)
+        self.horizontalScrollBar().valueChanged.connect(self._sync_header)
+        self._sync_header()
+
+    def _sync_header(self, *_):
+        canvas = self.widget()
+        if canvas is None:
+            return
+        viewport = self.viewport()
+        geometry = viewport.geometry()
+        self._header_clip.setGeometry(geometry.x(), geometry.y() - self.header.height(),
+                                      geometry.width(), self.header.height())
+        # mapTo accounts for both RTL scrollbars and the canvas scroll offset.
+        self.header.setGeometry(canvas.mapTo(viewport, QPoint()).x(), 0,
+                                canvas.width(), self.header.height())
+
+    def eventFilter(self, watched, event):
+        if event.type() in (QEvent.Resize, QEvent.Move):
+            self._sync_header()
+        return super().eventFilter(watched, event)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if hasattr(self, "_header_clip"):
+            self._sync_header()
 
 
 class GanttTimeline(QWidget):
@@ -213,6 +264,7 @@ class GanttTimeline(QWidget):
         self._selected_id = None
         self._rtl = False
         self._lang = "ar"
+        self.setMinimumWidth(self.NAME_WIDTH + 360)
 
     # ------------------------------------------------------------------ #
     def set_model(self, activities, rtl, lang):
@@ -272,7 +324,7 @@ class GanttTimeline(QWidget):
 
     # ------------------------------------------------------------------ #
     def _ratio_for(self, day):
-        total_days = max(1, (self._end - self._start).days)
+        total_days = max(1, (self._end - self._start).days + 1)
         ratio = (day - self._start).days / total_days
         return 1.0 - ratio if self._rtl else ratio
 
@@ -296,8 +348,8 @@ class GanttTimeline(QWidget):
     # ------------------------------------------------------------------ #
     def paintEvent(self, _event):
         painter = QPainter(self)
-        painter.fillRect(self.rect(), self.palette().window())
         colors = schedule_colors(constants.get_theme())
+        painter.fillRect(self.rect(), QColor(colors["panel"]))
         width = self.width()
 
         # month bands behind everything (labels live in the header widget)
@@ -308,7 +360,7 @@ class GanttTimeline(QWidget):
                          QColor(colors["accent_tint"]))
 
         today = datetime.date.today()
-        if self._start <= today <= self._end:
+        if self._start is not None and self._end is not None and self._start <= today <= self._end:
             x = self.NAME_WIDTH + self._ratio_for(today) * (width - self.NAME_WIDTH)
             painter.setPen(QPen(QColor(colors["today"]), 2, Qt.DashLine))
             painter.drawLine(QPointF(x, 0), QPointF(x, self.height()))
@@ -409,6 +461,7 @@ class GanttTimeline(QWidget):
 
 
 class SchedulePage(QWidget):
+    project_requested = Signal(int)
     """The project time schedule (Gantt) screen."""
 
     def __init__(self, db):
@@ -422,7 +475,12 @@ class SchedulePage(QWidget):
 
         self.header = QLabel(tr("schedule_no_project"))
         self.header.setObjectName("breadcrumb")
-        layout.addWidget(self.header)
+        context_row = QHBoxLayout()
+        context_row.addWidget(self.header, 1)
+        self.project_picker = ProjectPicker(db)
+        self.project_picker.project_requested.connect(self.project_requested)
+        context_row.addWidget(self.project_picker)
+        layout.addLayout(context_row)
 
         toolbar = QHBoxLayout()
         self.add_btn = QPushButton(tr("schedule_add"))
@@ -453,11 +511,8 @@ class SchedulePage(QWidget):
         self.timeline.activityDoubleClicked.connect(lambda _id: self._edit_selected())
         self.timeline_header = TimelineHeader()
 
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setWidget(self.timeline)
-        scroll.setFrameShape(QFrame.NoFrame)
-        layout.addWidget(scroll, 1)
+        self.timeline_scroll = TimelineScrollArea(self.timeline, self.timeline_header)
+        layout.addWidget(self.timeline_scroll, 1)
 
         self._reload()
 
@@ -465,6 +520,7 @@ class SchedulePage(QWidget):
     def open_project(self, project_id):
         """Called by the main window when a project is opened."""
         self.project = self.db.get_project(project_id)
+        self.project_picker.set_project(project_id)
         self._reload()
 
     def reload(self):
@@ -473,13 +529,18 @@ class SchedulePage(QWidget):
     def _is_rtl(self):
         return self.layoutDirection() == Qt.RightToLeft
 
+    def _can_edit(self):
+        return (self.project is not None
+                and auth.can_edit_project(self.db, self.project["id"]))
+
     def _refresh_buttons(self):
         has_project = self.project is not None
         has_selection = self.timeline.selected_activity_id() is not None
-        self.add_btn.setEnabled(has_project)
+        editable = self._can_edit()
+        self.add_btn.setEnabled(editable)
         self.export_btn.setEnabled(has_project)
         for widget in (self.edit_btn, self.delete_btn, self.up_btn, self.down_btn):
-            widget.setEnabled(has_project and has_selection)
+            widget.setEnabled(editable and has_selection)
 
     def _reload(self):
         rtl = self._is_rtl()
@@ -516,10 +577,12 @@ class SchedulePage(QWidget):
         return dialog
 
     def _add_activity(self):
+        if not self._can_edit():
+            return
         if self.project is None:
             return
         dialog = self._ask_activity()
-        if dialog is None:
+        if dialog is None or not self._can_edit():
             return
         values = dialog.values()
         self.db.add_schedule_activity(self.project["id"], values["name"],
@@ -532,28 +595,34 @@ class SchedulePage(QWidget):
         self._reload()
 
     def _edit_selected(self):
+        if not self._can_edit():
+            return
         activity = self.timeline.selected_activity()
         if activity is None:
             QMessageBox.information(self, tr("schedule_edit"), tr("schedule_no_selection"))
             return
         dialog = self._ask_activity(activity)
-        if dialog is None:
+        if dialog is None or not self._can_edit():
             return
         self.db.update_schedule_activity(activity["id"], **dialog.values())
         self._reload()
 
     def _delete_selected(self):
+        if not self._can_edit():
+            return
         activity = self.timeline.selected_activity()
         if activity is None:
             return
         confirm = QMessageBox.question(
             self, tr("schedule_delete"),
             f"{tr('schedule_delete_confirm')}\n{activity['name']}")
-        if confirm == QMessageBox.Yes:
+        if confirm == QMessageBox.Yes and self._can_edit():
             self.db.delete_schedule_activity(activity["id"])
             self._reload()
 
     def _move(self, direction):
+        if not self._can_edit():
+            return
         if self.project is None:
             return
         activity_id = self.timeline.selected_activity_id()

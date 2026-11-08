@@ -23,11 +23,28 @@ import re
 import shutil
 import sqlite3
 from datetime import datetime, date
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-MAX_AUTO_BACKUPS = 14
+MAX_AUTO_BACKUPS = 14      # newest daily snapshots always kept
+KEEP_WEEKLY = 8            # + the newest snapshot of each of the last 8 weeks
+KEEP_MONTHLY = 12          # + the newest snapshot of each of the last 12 months
 _BACKUP_NAME_RE = re.compile(r"^project_tracker_(\d{4}-\d{2}-\d{2})_(\d{6})\.db$")
+
+
+def snapshot_database(source_path, destination_path):
+    """Copy a committed SQLite snapshot, including data held in the WAL."""
+    src = sqlite3.connect(source_path, timeout=30)
+    try:
+        dst = sqlite3.connect(destination_path)
+        try:
+            with dst:
+                src.backup(dst)
+        finally:
+            dst.close()
+    finally:
+        src.close()
 
 
 def backups_dir_for(data_dir):
@@ -52,13 +69,39 @@ def _existing_backups(backups_dir):
     return found
 
 
-def maybe_create_auto_backup(db_path, data_dir):
+def check_integrity(db_path):
+    """Runs SQLite's quick_check on *db_path* without changing it.
+
+    Returns (ok, message). A missing file counts as ok (nothing to check
+    yet); a file SQLite cannot even open counts as not ok."""
+    if not os.path.isfile(db_path):
+        return True, ""
+    try:
+        uri = Path(db_path).resolve().as_uri() + "?mode=ro"
+        conn = sqlite3.connect(uri, uri=True)
+        try:
+            rows = conn.execute("PRAGMA quick_check").fetchall()
+        finally:
+            conn.close()
+    except sqlite3.Error as exc:
+        return False, str(exc)
+    messages = [str(r[0]) for r in rows]
+    if messages == ["ok"]:
+        return True, ""
+    return False, "; ".join(messages[:5])
+
+
+def maybe_create_auto_backup(db_path, data_dir, prune=True):
     """Creates a new dated backup of db_path if one hasn't already been
     made today, then prunes old auto-backups beyond MAX_AUTO_BACKUPS.
     Safe to call on every app startup — never raises (a failed backup
     should never stop the app from opening), and does nothing if there's
     no database yet (a brand-new install). Returns the new backup's path,
-    or None if no new backup was created."""
+    or None if no new backup was created.
+
+    prune=False keeps every existing backup - used when the live database
+    failed its integrity check, so a damaged copy can never push the last
+    good backups out of the rotation."""
     if not os.path.isfile(db_path):
         return None
 
@@ -71,7 +114,8 @@ def maybe_create_auto_backup(db_path, data_dir):
 
     existing = _existing_backups(backups_dir)
     if existing and existing[-1][0].date() == date.today():
-        _prune_old_backups(backups_dir, existing)
+        if prune:
+            _prune_old_backups(backups_dir, existing)
         return None
 
     now = datetime.now()
@@ -81,7 +125,7 @@ def maybe_create_auto_backup(db_path, data_dir):
         # a plain copy made while the app is writing could capture a torn
         # mid-transaction state; the API always yields a consistent,
         # fully-restorable database.
-        src = sqlite3.connect(db_path)
+        src = sqlite3.connect(db_path, timeout=30)
         try:
             dst = sqlite3.connect(dest)
             try:
@@ -101,18 +145,101 @@ def maybe_create_auto_backup(db_path, data_dir):
         return None
 
     logger.info("Automatic backup created: %s", dest)
-    _prune_old_backups(backups_dir, existing + [(now, dest)])
+    if prune:
+        _prune_old_backups(backups_dir, existing + [(now, dest)])
     return dest
 
 
+def _backups_to_keep(backups, today=None):
+    """Tiered retention: the newest MAX_AUTO_BACKUPS snapshots, plus the
+    newest one of each recent week (KEEP_WEEKLY) and month (KEEP_MONTHLY).
+
+    A problem nobody notices for a few weeks (a wrong bulk edit, a bad
+    import) must still be recoverable, so older history thins out instead
+    of disappearing after two weeks."""
+    today = today or date.today()
+    ordered = sorted(backups, key=lambda pair: pair[0])
+    keep = {path for _dt, path in ordered[-MAX_AUTO_BACKUPS:]} if MAX_AUTO_BACKUPS > 0 else set()
+
+    this_week = today.isocalendar()[:2]
+    newest_per_week = {}
+    newest_per_month = {}
+    for dt, path in ordered:
+        week = dt.date().isocalendar()[:2]
+        weeks_ago = (this_week[0] - week[0]) * 52 + (this_week[1] - week[1])
+        if 0 <= weeks_ago < KEEP_WEEKLY:
+            newest_per_week[week] = path
+        months_ago = (today.year - dt.year) * 12 + (today.month - dt.month)
+        if 0 <= months_ago < KEEP_MONTHLY:
+            newest_per_month[(dt.year, dt.month)] = path
+    keep.update(newest_per_week.values())
+    keep.update(newest_per_month.values())
+    return keep
+
+
 def _prune_old_backups(backups_dir, backups):
-    if len(backups) <= MAX_AUTO_BACKUPS:
-        return
-    for _dt, path in backups[: len(backups) - MAX_AUTO_BACKUPS]:
+    keep = _backups_to_keep(backups)
+    for _dt, path in backups:
+        if path in keep:
+            continue
         try:
             os.remove(path)
         except OSError:
             pass
+
+
+def mirror_attachments(attachments_dir, data_dir):
+    """Copies new or changed attachment files into backups/attachments.
+
+    Incremental (only what changed is copied) and add-only: a file removed
+    from the live folder - e.g. by "Delete Forever" - stays in the mirror,
+    so a mistaken permanent delete can still be recovered. Returns the
+    number of files copied; never raises."""
+    if not attachments_dir or not os.path.isdir(attachments_dir):
+        return 0
+    mirror = os.path.join(backups_dir_for(data_dir), "attachments")
+    copied = 0
+    for root, _dirs, files in os.walk(attachments_dir):
+        rel = os.path.relpath(root, attachments_dir)
+        target_dir = os.path.normpath(os.path.join(mirror, rel))
+        for name in files:
+            src = os.path.join(root, name)
+            dst = os.path.join(target_dir, name)
+            try:
+                st = os.stat(src)
+                if os.path.exists(dst):
+                    dt = os.stat(dst)
+                    if dt.st_size == st.st_size and int(dt.st_mtime) >= int(st.st_mtime):
+                        continue
+                os.makedirs(target_dir, exist_ok=True)
+                shutil.copy2(src, dst)
+                copied += 1
+            except OSError:
+                logger.warning("Could not mirror attachment %s", src, exc_info=True)
+    if copied:
+        logger.info("Mirrored %d attachment file(s) into %s", copied, mirror)
+    return copied
+
+
+def copy_to_extra_folder(backup_path, extra_dir):
+    """Copies a finished snapshot to a second location (another drive,
+    OneDrive / Google Drive folder, USB) and applies the same retention
+    there. A backup on the same disk as the data does not survive a disk
+    failure or theft. Returns the copied path, or None; never raises."""
+    if not backup_path or not extra_dir:
+        return None
+    if not os.path.isdir(extra_dir):
+        logger.warning("Second backup folder is not available: %s", extra_dir)
+        return None
+    try:
+        dest = os.path.join(extra_dir, os.path.basename(backup_path))
+        shutil.copy2(backup_path, dest)
+    except OSError:
+        logger.warning("Could not copy backup to %s", extra_dir, exc_info=True)
+        return None
+    _prune_old_backups(extra_dir, _existing_backups(extra_dir))
+    logger.info("Backup copied to second folder: %s", dest)
+    return dest
 
 
 def last_backup_datetime(data_dir):

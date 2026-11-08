@@ -24,3 +24,9 @@ notes.md.txt
 # ---- OS noise ----
 Thumbs.db
 Desktop.ini
+
+# ---- agent/QA scratch (local only) ----
+.attachment_qa/
+.auth_review_tmp/
+.openclaw_test_out.txt
+*.p2bak

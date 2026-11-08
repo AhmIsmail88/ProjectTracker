@@ -8,6 +8,8 @@ group can use different units (عدد / م.ط / مجموعة), so a total would 
 meaningless. Value is grouped per currency for the same reason.
 """
 
+from i18n import tr_text
+
 import os
 
 from openpyxl import Workbook
@@ -82,7 +84,7 @@ class VarianceReportDialog(QDialog):
 
         self.table = EmptyStateTable(tr("var_empty"))
         self.table.setColumnCount(len(COLUMNS))
-        self.table.setHorizontalHeaderLabels(COLUMNS)
+        self.table.setHorizontalHeaderLabels([tr_text(label) for label in COLUMNS])
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setAlternatingRowColors(True)

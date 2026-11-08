@@ -3,17 +3,20 @@ ui/suppliers_page.py
 Standalone "Suppliers" screen — suppliers are shared across all projects.
 """
 
+from i18n import tr_text
+
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton,
     QTableWidget, QTableWidgetItem, QAbstractItemView, QMessageBox, QStyle
 )
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QItemSelectionModel
 from PySide6.QtGui import QShortcut, QKeySequence
 
 from ui.dialogs import SupplierDialog
 from ui.table_utils import configure_interactive_table, EmptyStateTable
 from ui.activity_widget import ActivityDialog
 from i18n import tr
+import auth
 
 SUPPLIER_COLUMNS = ["Name", "Contact Person", "Phone", "Email"]
 
@@ -43,7 +46,9 @@ class SuppliersPage(QWidget):
         add_btn.clicked.connect(self._add_supplier)
         edit_btn = QPushButton(tr("edit"))
         edit_btn.clicked.connect(self._edit_supplier)
+        self.edit_btn = edit_btn
         delete_btn = QPushButton(tr("delete"))
+        self.delete_btn = delete_btn
         delete_btn.setObjectName("dangerButton")
         delete_btn.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_TrashIcon))
         delete_btn.clicked.connect(self._delete_supplier)
@@ -56,9 +61,9 @@ class SuppliersPage(QWidget):
         btn_row.addStretch()
         layout.addLayout(btn_row)
 
-        self.table = EmptyStateTable("No suppliers yet \u2014 click \u201c+ Add\u201d to create one.")
+        self.table = EmptyStateTable(tr_text("No suppliers yet \u2014 click \u201c+ Add\u201d to create one."))
         self.table.setColumnCount(len(SUPPLIER_COLUMNS))
-        self.table.setHorizontalHeaderLabels(SUPPLIER_COLUMNS)
+        self.table.setHorizontalHeaderLabels([tr_text(label) for label in SUPPLIER_COLUMNS])
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setAlternatingRowColors(True)
@@ -72,7 +77,23 @@ class SuppliersPage(QWidget):
 
         self.reload()
 
+    def _can_add(self):
+        # Any signed-in account may add a supplier (needed while entering
+        # items); changing or removing one affects every project, so that
+        # is reserved for managers.
+        return auth.session_matches(self.db) and auth.current_user() is not None
+
+    def _can_change(self):
+        return auth.is_manager(self.db)
+
+    def _apply_permissions(self):
+        allowed = self._can_change()
+        for btn in (self.edit_btn, self.delete_btn):
+            btn.setEnabled(allowed)
+            btn.setToolTip("" if allowed else tr_text("Managers only"))
+
     def reload(self):
+        self._apply_permissions()
         self.table.setSortingEnabled(False)
         suppliers = list(self.db.get_suppliers())
         self.table.setRowCount(len(suppliers))
@@ -96,7 +117,8 @@ class SuppliersPage(QWidget):
 
     def _selected_id(self):
         row = self.table.currentRow()
-        if row < 0:
+        if (row < 0 or self.table.isRowHidden(row)
+                or not self.table.selectionModel().isRowSelected(row)):
             QMessageBox.information(self, "No supplier selected", "Select a supplier first.")
             return None
         return self.table.item(row, 0).data(Qt.UserRole)
@@ -105,30 +127,36 @@ class SuppliersPage(QWidget):
         for row in range(self.table.rowCount()):
             item = self.table.item(row, 0)
             if item and item.data(Qt.UserRole) == supplier_id:
-                self.table.selectRow(row)
+                self.table.setCurrentCell(row, 0, QItemSelectionModel.ClearAndSelect | QItemSelectionModel.Rows)
                 self.table.scrollToItem(item)
                 self.table.setFocus()
                 break
 
     def _add_supplier(self):
+        if not self._can_add():
+            return
         dlg = SupplierDialog(self)
-        if dlg.exec():
+        if dlg.exec() and self._can_add():
             new_id = self.db.add_supplier(**dlg.get_data())
             self.search_edit.clear()  # a stale search filter could hide the new supplier
             self.reload()
             self._select_row_by_id(new_id)
 
     def _edit_supplier(self):
+        if not self._can_change():
+            return
         sid = self._selected_id()
         if sid is None:
             return
         suppliers = {s["id"]: s for s in self.db.get_suppliers()}
         dlg = SupplierDialog(self, supplier=suppliers[sid])
-        if dlg.exec():
+        if dlg.exec() and self._can_change():
             self.db.update_supplier(sid, **dlg.get_data())
             self.reload()
 
     def _delete_supplier(self):
+        if not self._can_change():
+            return
         sid = self._selected_id()
         if sid is None:
             return
@@ -138,6 +166,8 @@ class SuppliersPage(QWidget):
         self.reload()
 
         def _undo():
+            if not self._can_change():
+                return
             self.db.restore_supplier(sid)
             self.reload()
 

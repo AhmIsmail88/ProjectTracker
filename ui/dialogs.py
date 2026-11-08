@@ -4,9 +4,12 @@ All popup dialogs used by the main window: add/edit project, add/edit item,
 add/edit supplier, and manage attachments for an item.
 """
 
+from i18n import tr_text
+
 import os
 import subprocess
 import sys
+import auth
 
 from PySide6.QtWidgets import (
     QDialog, QFormLayout, QVBoxLayout, QHBoxLayout, QLineEdit, QComboBox,
@@ -109,24 +112,30 @@ class ProjectDialog(QDialog):
         self.group_combo = QComboBox()
         self._reload_group_combo()
         self.group_combo.currentIndexChanged.connect(self._on_group_changed)
+        self.assignee_combo = QComboBox()
+        self._reload_assignee_combo()
+        # Only a manager assigns engineers; for other roles the field
+        # stays visible but read-only.
+        self.assignee_combo.setEnabled(auth.is_manager(self.db))
 
         self.notes_edit = QTextEdit()
         self.notes_edit.setFixedHeight(70)
 
         form = QFormLayout()
-        form.addRow("Project Name*:", self.name_edit)
-        group_label = QLabel("Main Project (Group):")
+        form.addRow(tr_text("Project Name*:"), self.name_edit)
+        group_label = QLabel(tr_text("Main Project (Group):"))
         group_label.setToolTip(
-            "Which overall/main project this belongs to \u2014 several related section-projects "
+            tr_text("Which overall/main project this belongs to \u2014 several related section-projects "
             "(e.g. different areas of the same site) can share one Group, so you can select and "
-            "report on them together from the Dashboard or AI Assistant."
+            "report on them together from the Dashboard or AI Assistant.")
         )
         form.addRow(group_label, self.group_combo)
-        form.addRow("Location:", self.location_edit)
-        form.addRow("Contractor:", self.contractor_edit)
-        form.addRow("Project Number:", self.project_number_edit)
-        form.addRow("Default Currency:", self.currency_combo)
-        form.addRow("Notes:", self.notes_edit)
+        form.addRow(tr_text("Assigned engineer:"), self.assignee_combo)
+        form.addRow(tr_text("Location:"), self.location_edit)
+        form.addRow(tr_text("Contractor:"), self.contractor_edit)
+        form.addRow(tr_text("Project Number:"), self.project_number_edit)
+        form.addRow(tr_text("Default Currency:"), self.currency_combo)
+        form.addRow(tr_text("Notes:"), self.notes_edit)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.accepted.connect(self._on_accept)
@@ -148,8 +157,23 @@ class ProjectDialog(QDialog):
             group_idx = self.group_combo.findData(project["group_id"])
             self.group_combo.setCurrentIndex(max(group_idx, 0))
             self.notes_edit.setPlainText(project["notes"] or "")
+            assignee = project["assigned_user_id"] if "assigned_user_id" in project.keys() else None
+            combo_index = self.assignee_combo.findData(assignee)
+            self.assignee_combo.setCurrentIndex(combo_index if combo_index >= 0 else 0)
         else:
             self.currency_combo.setCurrentText("SAR")
+
+    def _reload_assignee_combo(self):
+        self.assignee_combo.addItem(tr_text("Unassigned"), None)
+        if not self.db:
+            return
+        for user in self.db.list_users(active_only=True):
+            if user["role"] == "user":
+                label = user["display_name"] or user["username"]
+                self.assignee_combo.addItem(label, user["id"])
+
+    def selected_assignee_id(self):
+        return self.assignee_combo.currentData()
 
     def _reload_group_combo(self, select_group_id=None):
         self.group_combo.blockSignals(True)
@@ -173,7 +197,7 @@ class ProjectDialog(QDialog):
         # select the new group instead of leaving the sentinel selected.
         name, ok = QInputDialog.getText(self, "New Group", "Group name (e.g. the overall project name):")
         name = (name or "").strip()
-        if not ok or not name or self.db is None:
+        if not ok or not name or self.db is None or not auth.is_manager(self.db):
             self._reload_group_combo()  # revert to "No group" — nothing was actually picked
             return
         new_id = self.db.add_project_group(name)
@@ -231,13 +255,13 @@ class ManageGroupsDialog(QDialog):
     def __init__(self, parent, db):
         super().__init__(parent)
         self.db = db
-        self.setWindowTitle("Manage Groups")
+        self.setWindowTitle(tr_text("Manage Groups"))
         self.setMinimumSize(380, 320)
 
         layout = QVBoxLayout(self)
         hint = QLabel(
-            "Rename or delete a Main Project (Group). Deleting a group never deletes its "
-            "member projects \u2014 they just become ungrouped."
+            tr_text("Rename or delete a Main Project (Group). Deleting a group never deletes its "
+            "member projects \u2014 they just become ungrouped.")
         )
         hint.setWordWrap(True)
         layout.addWidget(hint)
@@ -246,11 +270,11 @@ class ManageGroupsDialog(QDialog):
         layout.addWidget(self.list_widget, 1)
 
         btn_row = QHBoxLayout()
-        add_btn = QPushButton("+ New")
+        add_btn = QPushButton(tr_text("+ New"))
         add_btn.clicked.connect(self._add)
-        rename_btn = QPushButton("Rename")
+        rename_btn = QPushButton(tr_text("Rename"))
         rename_btn.clicked.connect(self._rename)
-        delete_btn = QPushButton("Delete")
+        delete_btn = QPushButton(tr_text("Delete"))
         delete_btn.setObjectName("dangerButton")
         delete_btn.clicked.connect(self._delete)
         btn_row.addWidget(add_btn)
@@ -258,7 +282,7 @@ class ManageGroupsDialog(QDialog):
         btn_row.addWidget(delete_btn)
         layout.addLayout(btn_row)
 
-        close_btn = QPushButton("Close")
+        close_btn = QPushButton(tr_text("Close"))
         close_btn.clicked.connect(self.accept)
         layout.addWidget(close_btn)
 
@@ -279,24 +303,30 @@ class ManageGroupsDialog(QDialog):
         return item.data(Qt.UserRole)
 
     def _add(self):
+        if not auth.is_manager(self.db):
+            return
         name, ok = QInputDialog.getText(self, "New Group", "Group name:")
         name = (name or "").strip()
-        if ok and name:
+        if ok and name and auth.is_manager(self.db):
             self.db.add_project_group(name)
             self._reload()
 
     def _rename(self):
+        if not auth.is_manager(self.db):
+            return
         group_id = self._selected_id()
         if group_id is None:
             return
         current = self.list_widget.currentItem().text()
         name, ok = QInputDialog.getText(self, "Rename Group", "Group name:", text=current)
         name = (name or "").strip()
-        if ok and name:
+        if ok and name and auth.is_manager(self.db):
             self.db.update_project_group(group_id, name=name)
             self._reload()
 
     def _delete(self):
+        if not auth.is_manager(self.db):
+            return
         group_id = self._selected_id()
         if group_id is None:
             return
@@ -305,7 +335,8 @@ class ManageGroupsDialog(QDialog):
         msg = f"Delete group {name!r}?"
         if member_count:
             msg += f"\n\nIts {member_count} project(s) will NOT be deleted \u2014 they'll just become ungrouped."
-        if QMessageBox.question(self, "Delete Group", msg) == QMessageBox.Yes:
+        if (QMessageBox.question(self, "Delete Group", msg) == QMessageBox.Yes
+                and auth.is_manager(self.db)):
             self.db.delete_project_group(group_id)
             self._reload()
 
@@ -326,11 +357,11 @@ class SupplierDialog(QDialog):
         self.notes_edit.setFixedHeight(60)
 
         form = QFormLayout()
-        form.addRow("Supplier Name*:", self.name_edit)
-        form.addRow("Contact Person:", self.contact_edit)
-        form.addRow("Phone:", self.phone_edit)
-        form.addRow("Email:", self.email_edit)
-        form.addRow("Notes:", self.notes_edit)
+        form.addRow(tr_text("Supplier Name*:"), self.name_edit)
+        form.addRow(tr_text("Contact Person:"), self.contact_edit)
+        form.addRow(tr_text("Phone:"), self.phone_edit)
+        form.addRow(tr_text("Email:"), self.email_edit)
+        form.addRow(tr_text("Notes:"), self.notes_edit)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.accepted.connect(self._on_accept)
@@ -386,8 +417,8 @@ class ItemDialog(QDialog):
         supplier_row = QHBoxLayout()
         self.supplier_combo = QComboBox()
         self._reload_supplier_combo()
-        add_supplier_btn = QPushButton("+ " + tr("suppliers"))
-        add_supplier_btn.setToolTip("Add a new supplier without leaving this form")
+        add_supplier_btn = QPushButton("+ " + tr_text("New supplier"))
+        add_supplier_btn.setToolTip(tr_text("Add a new supplier without leaving this form"))
         add_supplier_btn.clicked.connect(self._add_supplier_inline)
         supplier_row.addWidget(self.supplier_combo, 1)
         supplier_row.addWidget(add_supplier_btn)
@@ -405,46 +436,46 @@ class ItemDialog(QDialog):
         for spin in (self.total_qty_spin, self.requested_qty_spin, self.delivered_qty_spin):
             spin.valueChanged.connect(self._refresh_computed)
 
-        self.remaining_request_label = QLabel("0")
-        self.remaining_deliver_label = QLabel("0")
+        self.remaining_request_label = QLabel(tr_text("0"))
+        self.remaining_deliver_label = QLabel(tr_text("0"))
         self.status_chip = QLabel()
         self.status_chip.setAlignment(Qt.AlignCenter)
         self.status_chip.setFixedHeight(26)
 
-        self.manual_hold_check = QCheckBox("On Hold (manual override)")
-        self.po_issued_check = QCheckBox("PO Issued")
+        self.manual_hold_check = QCheckBox(tr_text("On Hold (manual override)"))
+        self.po_issued_check = QCheckBox(tr_text("PO Issued"))
         self.manual_hold_check.stateChanged.connect(self._refresh_computed)
         self.po_issued_check.stateChanged.connect(self._refresh_computed)
 
         self.variance_note_edit = QLineEdit()
-        self.variance_note_edit.setPlaceholderText("Required when delivered quantity exceeds total quantity")
-        self.variance_note_label = QLabel("Over-supply note*:")
+        self.variance_note_edit.setPlaceholderText(tr_text("Required when delivered quantity exceeds total quantity"))
+        self.variance_note_label = QLabel(tr_text("Over-supply note*:"))
         self.variance_note_edit.setVisible(False)
         self.variance_note_label.setVisible(False)
 
         self.remarks_edit = QTextEdit()
-        self.remarks_edit.setFixedHeight(56)
+        self.remarks_edit.setFixedHeight(84)
 
         form = QFormLayout()
-        form.addRow("Item Name*:", self.item_name_edit)
+        form.addRow(tr_text("Item Name*:"), self.item_name_edit)
         # Keep the form stable: when the name field grows, the window grows
         # with it instead of compressing the rows underneath.
         self.item_name_edit.height_changed.connect(lambda _h: self.adjustSize())
-        form.addRow("Pump Station / Area:", self.pump_station_edit)
-        form.addRow("Supplier:", supplier_row)
-        form.addRow("Unit:", self.unit_edit)
-        form.addRow("Currency:", self.currency_combo)
-        form.addRow("Total Quantity:", self.total_qty_spin)
-        form.addRow("Requested Quantity:", self.requested_qty_spin)
-        form.addRow("Delivered Quantity:", self.delivered_qty_spin)
-        form.addRow("Unit Cost:", self.unit_cost_spin)
-        form.addRow("Remaining to request:", self.remaining_request_label)
-        form.addRow("Remaining to deliver:", self.remaining_deliver_label)
+        form.addRow(tr_text("Pump Station / Area:"), self.pump_station_edit)
+        form.addRow(tr_text("Supplier:"), supplier_row)
+        form.addRow(tr_text("Unit:"), self.unit_edit)
+        form.addRow(tr_text("Currency:"), self.currency_combo)
+        form.addRow(tr_text("Total Quantity:"), self.total_qty_spin)
+        form.addRow(tr_text("Requested Quantity:"), self.requested_qty_spin)
+        form.addRow(tr_text("Delivered Quantity:"), self.delivered_qty_spin)
+        form.addRow(tr_text("Unit Cost:"), self.unit_cost_spin)
+        form.addRow(tr_text("Remaining to request:"), self.remaining_request_label)
+        form.addRow(tr_text("Remaining to deliver:"), self.remaining_deliver_label)
         form.addRow(self.po_issued_check)
         form.addRow(self.manual_hold_check)
-        form.addRow("Computed Status:", self.status_chip)
+        form.addRow(tr_text("Computed Status:"), self.status_chip)
         form.addRow(self.variance_note_label, self.variance_note_edit)
-        form.addRow("Remarks / Drawing No.:", self.remarks_edit)
+        form.addRow(tr_text("Remarks / Drawing No.:"), self.remarks_edit)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.accepted.connect(self._on_accept)
@@ -469,12 +500,20 @@ class ItemDialog(QDialog):
                     idx = self.supplier_combo.count() - 1
                 self.supplier_combo.setCurrentIndex(idx)
             self.unit_edit.setText(item["unit"] or "")
-            cur_idx = self.currency_combo.findText(item["currency"] or default_currency or "SAR")
+            currency = (item["currency"] or default_currency or "SAR").strip()
+            cur_idx = self.currency_combo.findText(currency)
+            if cur_idx < 0 and currency:
+                # A currency outside the standard list (e.g. imported from
+                # Excel) must survive an edit of some other field instead of
+                # silently becoming the first entry (SAR).
+                self.currency_combo.addItem(currency)
+                cur_idx = self.currency_combo.count() - 1
             self.currency_combo.setCurrentIndex(max(cur_idx, 0))
-            self.total_qty_spin.setValue(item["total_quantity"] or 0)
-            self.requested_qty_spin.setValue(item["requested_quantity"] or 0)
-            self.delivered_qty_spin.setValue(item["delivered_quantity"] or 0)
-            self.unit_cost_spin.setValue(item["unit_cost"] or 0)
+            for spin, key in ((self.total_qty_spin, "total_quantity"),
+                              (self.requested_qty_spin, "requested_quantity"),
+                              (self.delivered_qty_spin, "delivered_quantity"),
+                              (self.unit_cost_spin, "unit_cost")):
+                self._load_spin(spin, item[key])
             self.manual_hold_check.setChecked(bool(item["manual_hold"]))
             self.po_issued_check.setChecked(bool(item["po_issued"]))
             self.variance_note_edit.setText(item["variance_note"] or "")
@@ -485,7 +524,7 @@ class ItemDialog(QDialog):
     def _reload_supplier_combo(self, select_id=None):
         self.supplier_combo.blockSignals(True)
         self.supplier_combo.clear()
-        self.supplier_combo.addItem("(No supplier)", None)
+        self.supplier_combo.addItem(tr_text("(No supplier)"), None)
         for s in self._suppliers:
             self.supplier_combo.addItem(s["name"], s["id"])
         if select_id is not None:
@@ -515,6 +554,32 @@ class ItemDialog(QDialog):
         spin.setMinimum(0)
         return spin
 
+    _MAX_SPIN_DECIMALS = 6
+
+    @classmethod
+    def _decimals_needed(cls, value):
+        """Fractional digits *value* really has (2..6), so the spin box can
+        show it exactly instead of rounding it to two places."""
+        for places in range(2, cls._MAX_SPIN_DECIMALS + 1):
+            if abs(round(value, places) - value) < 1e-9:
+                return places
+        return cls._MAX_SPIN_DECIMALS
+
+    def _load_spin(self, spin, value):
+        value = float(value or 0)
+        spin.setDecimals(max(spin.decimals(), self._decimals_needed(value)))
+        spin.setValue(value)
+        # Remember the stored value: if the user leaves this field alone,
+        # get_data() returns it untouched (no rounding, no audit noise).
+        spin.setProperty("original_value", value)
+
+    @staticmethod
+    def _spin_value(spin):
+        original = spin.property("original_value")
+        if original is not None and abs(spin.value() - round(original, spin.decimals())) < 1e-12:
+            return original
+        return spin.value()
+
     def _refresh_computed(self):
         total = self.total_qty_spin.value()
         requested = self.requested_qty_spin.value()
@@ -533,15 +598,15 @@ class ItemDialog(QDialog):
 
         info = STATUSES.get(status, {"color": "#E5E7EB", "text": "#374151"})
         if over:
-            bg, fg, label = "#EDE1FB", "#5B21B6", f"{status} (Over-supplied)"
+            bg, fg, label = "#EDE1FB", "#5B21B6", f"{tr_text(status)} ({tr_text('Over-supplied')})"
         elif delivered_no_request:
             bg, fg = DELIVERED_NO_REQUEST_COLOR, DELIVERED_NO_REQUEST_TEXT
-            label = f"{status} (Delivered w/o request)"
+            label = f"{tr_text(status)} ({tr_text('Delivered w/o request')})"
         elif over_requested:
             bg, fg = OVER_REQUEST_COLOR, OVER_REQUEST_TEXT
-            label = f"{status} (Over-requested)"
+            label = f"{tr_text(status)} ({tr_text('Over-requested')})"
         else:
-            bg, fg, label = info["color"], info["text"], status
+            bg, fg, label = info["color"], info["text"], tr_text(status)
         self.status_chip.setText(label)
         self.status_chip.setStyleSheet(
             f"background-color: {bg}; color: {fg}; border-radius: 6px; font-weight: 700; padding: 3px 8px;"
@@ -572,10 +637,10 @@ class ItemDialog(QDialog):
             "supplier_id": self.supplier_combo.currentData(),
             "unit": self.unit_edit.text().strip(),
             "currency": self.currency_combo.currentText().strip(),
-            "total_quantity": self.total_qty_spin.value(),
-            "requested_quantity": self.requested_qty_spin.value(),
-            "delivered_quantity": self.delivered_qty_spin.value(),
-            "unit_cost": self.unit_cost_spin.value(),
+            "total_quantity": self._spin_value(self.total_qty_spin),
+            "requested_quantity": self._spin_value(self.requested_qty_spin),
+            "delivered_quantity": self._spin_value(self.delivered_qty_spin),
+            "unit_cost": self._spin_value(self.unit_cost_spin),
             "manual_hold": self.manual_hold_check.isChecked(),
             "po_issued": self.po_issued_check.isChecked(),
             "variance_note": self.variance_note_edit.text().strip(),
@@ -686,177 +751,5 @@ class ScheduleActivityDialog(QDialog):
         }
 
 
-class AttachmentsDialog(QDialog):
-    """Manage PR / PO / Reference files attached to one item.
-    Supports uploading multiple files, opening them, and deleting them."""
-
-    def __init__(self, parent, db, item_id, item_name):
-        super().__init__(parent)
-        self.db = db
-        self.item_id = item_id
-        self.setWindowTitle(f"Attachments - {item_name}")
-        self.setMinimumSize(860, 520)
-        self._current_pixmap = None
-
-        layout = QVBoxLayout(self)
-        layout.addWidget(QLabel(f"Item: {item_name}"))
-
-        self.category_combo = QComboBox()
-        self.category_combo.addItems(ATTACHMENT_CATEGORIES)
-
-        add_row = QHBoxLayout()
-        add_row.addWidget(QLabel("Category:"))
-        add_row.addWidget(self.category_combo)
-        upload_btn = QPushButton("Upload File...")
-        upload_btn.clicked.connect(self._upload_file)
-        add_row.addWidget(upload_btn)
-        layout.addLayout(add_row)
-
-        self.list_widget = QListWidget()
-        self.list_widget.itemDoubleClicked.connect(lambda _item: self._open_selected())
-        self.list_widget.currentItemChanged.connect(lambda _a, _b: self._update_preview())
-
-        # List on one side, preview on the other: double-click still opens the
-        # file in its default application, but the common case (checking what a
-        # PR/PO scan actually is) no longer needs to leave the app.
-        self.preview_label = QLabel("Select a file to preview.")
-        self.preview_label.setAlignment(Qt.AlignCenter)
-        self.preview_label.setWordWrap(True)
-        self.preview_label.setMinimumWidth(320)
-
-        self.preview_stack = QStackedWidget()
-        self.preview_stack.addWidget(self.preview_label)
-        self.pdf_view = None
-        self.pdf_document = None
-        if PDF_PREVIEW_AVAILABLE:
-            self.pdf_document = QPdfDocument(self)
-            self.pdf_view = QPdfView()
-            self.pdf_view.setDocument(self.pdf_document)
-            self.pdf_view.setPageMode(QPdfView.PageMode.SinglePage)
-            self.pdf_view.setZoomMode(QPdfView.ZoomMode.FitToWidth)
-            self.preview_stack.addWidget(self.pdf_view)
-
-        splitter = QSplitter(Qt.Horizontal)
-        splitter.addWidget(self.list_widget)
-        splitter.addWidget(self.preview_stack)
-        splitter.setStretchFactor(0, 1)
-        splitter.setStretchFactor(1, 1)
-        layout.addWidget(splitter)
-
-        btn_row = QHBoxLayout()
-        open_btn = QPushButton("Open")
-        open_btn.clicked.connect(self._open_selected)
-        delete_btn = QPushButton("Delete")
-        delete_btn.clicked.connect(self._delete_selected)
-        close_btn = QPushButton("Close")
-        close_btn.clicked.connect(self.accept)
-        btn_row.addWidget(open_btn)
-        btn_row.addWidget(delete_btn)
-        btn_row.addStretch()
-        btn_row.addWidget(close_btn)
-        layout.addLayout(btn_row)
-
-        self._reload_list()
-
-    def _reload_list(self):
-        self.list_widget.clear()
-        for att in self.db.get_attachments(self.item_id):
-            display = f"[{att['category']}] {att['original_name']}  ({att['uploaded_date']})"
-            list_item = QListWidgetItem(display)
-            list_item.setData(Qt.UserRole, dict(att))
-            self.list_widget.addItem(list_item)
-
-    def _show_preview_message(self, text):
-        self._current_pixmap = None
-        self.preview_label.setPixmap(QPixmap())   # drop any previous image
-        self.preview_label.setText(text)
-        self.preview_stack.setCurrentIndex(0)
-
-    def _scaled_preview(self):
-        if self._current_pixmap is None:
-            return QPixmap()
-        return self._current_pixmap.scaled(self.preview_label.size(),
-                                           Qt.KeepAspectRatio, Qt.SmoothTransformation)
-
-    def _update_preview(self):
-        """Renders the selected attachment in-app: images directly, PDFs via
-        QtPdf, anything else just tells the user to use Open."""
-        current = self.list_widget.currentItem()
-        att = current.data(Qt.UserRole) if current else None
-        if not att:
-            self._show_preview_message("Select a file to preview.")
-            return
-
-        path = att.get("file_path") or ""
-        extension = os.path.splitext(path)[1].lower()
-
-        if extension in IMAGE_EXTENSIONS and os.path.isfile(path):
-            pixmap = QPixmap(path)
-            if pixmap.isNull():
-                self._show_preview_message("Could not read this image.")
-                return
-            self._current_pixmap = pixmap
-            self.preview_label.setText("")
-            self.preview_label.setPixmap(self._scaled_preview())
-            self.preview_stack.setCurrentIndex(0)
-            return
-
-        if extension == ".pdf" and PDF_PREVIEW_AVAILABLE and os.path.isfile(path):
-            self.pdf_document.load(path)
-            if self.pdf_document.status() == QPdfDocument.Status.Ready:
-                self._current_pixmap = None
-                self.preview_label.setPixmap(QPixmap())
-                self.preview_stack.setCurrentIndex(1)
-                return
-            self._show_preview_message("Could not open this PDF in the app - use Open.")
-            return
-
-        self._show_preview_message(
-            f"No in-app preview for '{extension or 'this file'}'.\nUse Open to view it."
-        )
-
-    def resizeEvent(self, event):
-        super().resizeEvent(event)
-        if self._current_pixmap is not None:
-            self.preview_label.setPixmap(self._scaled_preview())
-
-    def _upload_file(self):
-        path, _ = QFileDialog.getOpenFileName(self, "Select file to attach")
-        if not path:
-            return
-        category = self.category_combo.currentText()
-
-        if category in POST_DELIVERY_CATEGORIES_SET:
-            item = self.db.get_item(self.item_id)
-            if not item or item["status"] != "Delivered":
-                confirm = QMessageBox.question(
-                    self, "Item not marked as Delivered",
-                    f"This item's status is '{item['status'] if item else 'unknown'}', not 'Delivered'.\n\n"
-                    f"Upload this {category} document anyway?"
-                )
-                if confirm != QMessageBox.Yes:
-                    return
-
-        self.db.add_attachment(self.item_id, category, path)
-        self._reload_list()
-
-    def _current_attachment(self):
-        current = self.list_widget.currentItem()
-        if not current:
-            QMessageBox.information(self, "No selection", "Select a file first.")
-            return None
-        return current.data(Qt.UserRole)
-
-    def _open_selected(self):
-        att = self._current_attachment()
-        if att:
-            open_file_externally(att["file_path"])
-
-    def _delete_selected(self):
-        att = self._current_attachment()
-        if not att:
-            return
-        confirm = QMessageBox.question(self, "Delete file", f"Remove '{att['original_name']}'?")
-        if confirm == QMessageBox.Yes:
-            self.db.delete_attachment(att["id"])
-            self._reload_list()
+# Public alias retained for existing callers.
+from ui.attachments_dialog import AttachmentsDialog

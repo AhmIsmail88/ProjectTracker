@@ -1,78 +1,22 @@
-"""
-ui/projects_page.py
-Standalone "Projects" screen. Selecting/opening a project navigates the
-main window into the Tracker (items) screen for that project.
-"""
-
-from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton,
-    QTableWidget, QTableWidgetItem, QAbstractItemView, QMessageBox, QDialog,
-    QListWidget, QListWidgetItem, QStyle, QFileDialog, QProgressBar, QComboBox,
-    QFrame,
-)
-from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QColor, QShortcut, QKeySequence
-
+"""Tree navigation and a scoped project overview."""
+from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
+    QPushButton, QAbstractItemView, QMessageBox, QDialog, QListWidget, QListWidgetItem,
+    QFileDialog, QTreeWidget, QTreeWidgetItem, QSplitter, QMenu, QScrollArea)
+from PySide6.QtCore import Qt, Signal, QEvent
+from PySide6.QtGui import QShortcut, QKeySequence, QFontMetrics
 from ui.dialogs import ProjectDialog, ManageGroupsDialog
-from ui.table_utils import configure_interactive_table, ExportWorker, EmptyStateTable
+from ui.table_utils import ExportWorker
 from ui.activity_widget import ActivityDialog
 from ui.import_excel_dialog import ImportExcelDialog
+from ui.project_overview import ProjectOverview
+from ui.review_items_dialog import ReviewItemsDialog
+from ui.users_dialog import UsersDialog
+import auth
 from export.excel_export import export_multiple_projects_to_excel
-from constants import ratio_chip_colors
-from i18n import tr
-
-PROJECT_COLUMNS = ["Name", "Group", "Project Number", "Location", "Contractor", "Currency",
-                   "Delivered %"]
-
-
-class _PercentItem(QTableWidgetItem):
-    """Displays "78%" but sorts by the real number, so clicking the column
-    header ranks projects by completeness instead of alphabetically."""
-
-    def __init__(self, percent, tooltip=""):
-        super().__init__(f"{percent:.0f}%")
-        self._value = float(percent)
-        self.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        if tooltip:
-            self.setToolTip(tooltip)
-
-    def __lt__(self, other):
-        if isinstance(other, _PercentItem):
-            return self._value < other._value
-        return super().__lt__(other)
-
-
-def _compact_amount(value):
-    """1,250,000 -> 1.2M - keeps a KPI card readable instead of spilling a
-    long number across the card."""
-    v = float(value or 0)
-    for limit, suffix in ((1_000_000_000, "B"), (1_000_000, "M"), (1_000, "K")):
-        if abs(v) >= limit:
-            return f"{v / limit:,.1f}{suffix}"
-    return f"{v:,.0f}"
-
-
-def _kpi_card(title, severity=None):
-    """One number + caption. Reuses the same #statCard styling the Dashboard
-    screen uses, so both screens look identical without extra CSS."""
-    card = QFrame()
-    card.setObjectName("statCard")
-    if severity:
-        card.setProperty("severity", severity)
-    box = QVBoxLayout(card)
-    box.setContentsMargins(12, 10, 12, 10)
-    box.setSpacing(2)
-    value_label = QLabel("\u2014")
-    value_label.setObjectName("statValue")
-    title_label = QLabel(title)
-    title_label.setObjectName("breadcrumb")
-    sub_label = QLabel("")
-    sub_label.setObjectName("breadcrumb")
-    box.addWidget(value_label)
-    box.addWidget(title_label)
-    box.addWidget(sub_label)
-    return card, value_label, sub_label
-
+from i18n import tr, tr_text
+from ui.icons import make_icon
+from constants import get_theme
+from ui.styles import DARK_TOKENS, LIGHT_TOKENS
 
 
 class TrashDialog(QDialog):
@@ -83,7 +27,7 @@ class TrashDialog(QDialog):
         self.db = db
         self.on_change = on_change
         self.setWindowTitle(tr("trash"))
-        self.setMinimumSize(460, 360)
+        self.setMinimumSize(640, 400)
 
         layout = QVBoxLayout(self)
         layout.addWidget(QLabel(tr("trash")))
@@ -93,13 +37,20 @@ class TrashDialog(QDialog):
         btn_row = QHBoxLayout()
         restore_btn = QPushButton(tr("undo"))
         restore_btn.clicked.connect(self._restore_selected)
-        purge_btn = QPushButton("Delete Forever")
+        purge_btn = QPushButton(tr_text("Delete Forever"))
         purge_btn.setObjectName("dangerButton")
         purge_btn.clicked.connect(self._purge_selected)
-        close_btn = QPushButton("Close")
+        close_btn = QPushButton(tr_text("Close"))
         close_btn.clicked.connect(self.accept)
+        self.empty_btn = QPushButton(tr_text("Empty old trash…"))
+        self.empty_btn.setObjectName("dangerButton")
+        self.empty_btn.clicked.connect(self._empty_old_trash)
+        if not auth.is_manager(self.db):
+            self.empty_btn.setEnabled(False)
+            self.empty_btn.setToolTip(tr_text("Managers only"))
         btn_row.addWidget(restore_btn)
         btn_row.addWidget(purge_btn)
+        btn_row.addWidget(self.empty_btn)
         btn_row.addStretch()
         btn_row.addWidget(close_btn)
         layout.addLayout(btn_row)
@@ -109,7 +60,8 @@ class TrashDialog(QDialog):
     def _reload(self):
         self.list_widget.clear()
         for p in self.db.get_projects(include_deleted=True):
-            item = QListWidgetItem(f"{p['name']}  (deleted {p['deleted_at']})")
+            item = QListWidgetItem(f"{tr_text('deleted')} ⁦{p['deleted_at']}⁩  —  {p['name']}")
+            item.setToolTip(p["name"])
             item.setData(Qt.UserRole, p["id"])
             self.list_widget.addItem(item)
 
@@ -121,6 +73,8 @@ class TrashDialog(QDialog):
         return current.data(Qt.UserRole)
 
     def _restore_selected(self):
+        if not auth.is_manager(self.db):
+            return
         pid = self._selected_id()
         if pid is None:
             return
@@ -130,272 +84,434 @@ class TrashDialog(QDialog):
             self.on_change()
 
     def _purge_selected(self):
+        if not auth.is_manager(self.db):
+            return
         pid = self._selected_id()
         if pid is None:
             return
         confirm = QMessageBox.question(self, "Delete forever", "This cannot be undone. Continue?")
-        if confirm == QMessageBox.Yes:
+        if confirm == QMessageBox.Yes and auth.is_manager(self.db):
             self.db.purge_project(pid)
             self._reload()
             if self.on_change:
                 self.on_change()
 
 
+    EMPTY_TRASH_AFTER_DAYS = 30
+
+    def _empty_old_trash(self):
+        """Permanently removes trash older than 30 days - deleted projects
+        with their items, and items deleted one by one - after taking a
+        dedicated backup that the automatic rotation never deletes."""
+        if not auth.is_manager(self.db):
+            return
+        days = self.EMPTY_TRASH_AFTER_DAYS
+        summary = self.db.trash_summary(days)
+        if not summary["projects"] and not summary["loose_items"]:
+            QMessageBox.information(self, tr("trash"), tr_text(
+                "Nothing in the trash is older than {days} days.").format(days=days))
+            return
+        confirm = QMessageBox.question(
+            self, tr("trash"),
+            tr_text(
+                "Permanently delete {projects} project(s) with {project_items} item(s), and "
+                "{items} item(s) deleted individually, all deleted more than {days} days ago?\n\n"
+                "A backup of the database is taken first and kept until you remove it."
+            ).format(projects=summary["projects"], project_items=summary["items_in_projects"],
+                     items=summary["loose_items"], days=days),
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+        )
+        if confirm != QMessageBox.Yes or not auth.is_manager(self.db):
+            return
+
+        import os
+        from datetime import datetime
+        import backup
+        data_dir = os.path.dirname(os.path.abspath(self.db.db_path))
+        backups_dir = backup.backups_dir_for(data_dir)
+        safety_copy = os.path.join(
+            backups_dir, f"before_empty_trash_{datetime.now().strftime('%Y-%m-%d_%H%M%S')}.db")
+        try:
+            os.makedirs(backups_dir, exist_ok=True)
+            backup.snapshot_database(self.db.db_path, safety_copy)
+            backup.mirror_attachments(self.db.attachments_dir, data_dir)
+        except Exception as exc:  # noqa: BLE001 - never purge without a backup
+            QMessageBox.critical(self, tr("trash"),
+                                 tr_text("The backup failed, so nothing was deleted.") + f"\n\n{exc}")
+            return
+
+        self.db.empty_trash_items_and_projects(days)
+        self._reload()
+        if self.on_change:
+            self.on_change()
+        QMessageBox.information(self, tr("trash"),
+                                tr_text("Trash emptied. Backup taken before deleting:") + f"\n{safety_copy}")
+
+
 class ProjectsPage(QWidget):
     project_opened = Signal(int)
+    items_requested = Signal(int, str)
+    item_opened = Signal(int, int)
 
     def __init__(self, db, undo_bar, parent=None):
         super().__init__(parent)
-        self.db = db
-        self.undo_bar = undo_bar
-
+        self.db, self.undo_bar = db, undo_bar
+        self._tree_projects, self._tree_groups = {}, {}
         layout = QVBoxLayout(self)
         layout.setContentsMargins(14, 10, 14, 10)
-
-        header_row = QHBoxLayout()
+        header = QHBoxLayout()
         title = QLabel(tr("projects"))
         title.setObjectName("pageTitle")
-        header_row.addWidget(title)
-        header_row.addStretch()
-        manage_groups_btn = QPushButton("\U0001F4C1 Manage Groups\u2026")
-        manage_groups_btn.clicked.connect(self._open_manage_groups)
-        header_row.addWidget(manage_groups_btn)
-        trash_btn = QPushButton("\U0001F5D1 " + tr("trash"))
-        trash_btn.clicked.connect(self._open_trash)
-        header_row.addWidget(trash_btn)
-        layout.addLayout(header_row)
+        header.addWidget(title)
+        header.addStretch()
+        self.add_btn = QPushButton("+ " + tr("add"))
+        self.add_btn.setObjectName("primaryButton")
+        self.add_btn.clicked.connect(self._add_project)
+        header.addWidget(self.add_btn)
+        self.more_btn = QPushButton(tr_text("More Actions"))
+        menu = QMenu(self.more_btn)
+        self.project_actions = [menu.addAction(tr("edit"), self._edit_project),
+                                menu.addAction(tr("history"), self._open_history),
+                                menu.addAction(tr("delete"), self._delete_project)]
+        menu.addSeparator()
+        self.groups_action = menu.addAction(tr_text("Manage Groups…"), self._open_manage_groups)
+        users_action = menu.addAction(tr_text("Users\u2026"), self._open_users)
+        users_action.setVisible(auth.is_manager(self.db))
+        self.import_action = menu.addAction(tr_text("Import from Excel"), self._open_import_excel)
+        self.export_btn = menu.addAction(tr_text("Export this scope to Excel"), self._export_filtered_to_excel)
+        menu.addSeparator()
+        self.trash_action = menu.addAction(tr("trash"), self._open_trash)
+        if not auth.is_manager(self.db):
+            self.add_btn.setEnabled(False)
+            self.add_btn.setToolTip(tr_text("Only the manager can do this."))
+            for action in (self.project_actions[0], self.project_actions[2],
+                           self.groups_action, self.import_action, self.trash_action):
+                action.setEnabled(False)
+        self.more_btn.setMenu(menu)
+        header.addWidget(self.more_btn)
+        layout.addLayout(header)
 
-        # ---- At-a-glance strip: same aggregate the Dashboard already
-        # computes, so the two screens can never disagree. ----
-        self.stat_cards = {}
-        stats_row = QHBoxLayout()
-        stats_row.setSpacing(10)
-        for key, title_key, severity in [
-            ("projects", "stat_projects", None),
-            ("value", "stat_value", None),
-            ("pending", "stat_pending", "warn"),
-            ("blocked", "stat_blocked", "bad"),
-        ]:
-            card, value_label, sub_label = _kpi_card(tr(title_key), severity)
-            stats_row.addWidget(card, 1)
-            self.stat_cards[key] = (value_label, sub_label)
-        layout.addLayout(stats_row)
-
-        filter_row = QHBoxLayout()
+        tree_panel = QWidget()
+        self._tree_panel = tree_panel
+        tree_layout = QVBoxLayout(tree_panel)
+        tree_layout.setContentsMargins(0, 0, 0, 0)
         self.search_edit = QLineEdit()
         self.search_edit.setPlaceholderText(tr("search_projects"))
         self.search_edit.setClearButtonEnabled(True)
         self.search_edit.textChanged.connect(self._apply_filter)
-        filter_row.addWidget(self.search_edit, 1)
-        filter_row.addWidget(QLabel("Group:"))
-        self.group_filter = QComboBox()
-        self.group_filter.currentIndexChanged.connect(self._apply_filter)
-        filter_row.addWidget(self.group_filter)
-        layout.addLayout(filter_row)
-
-        btn_row = QHBoxLayout()
-        add_btn = QPushButton("+ " + tr("add"))
-        add_btn.setObjectName("primaryButton")
-        add_btn.clicked.connect(self._add_project)
-        import_btn = QPushButton("\U0001F4E5 Import from Excel")
-        import_btn.clicked.connect(self._open_import_excel)
-        self.export_btn = QPushButton("\U0001F4E4 Export Filtered to Excel")
-        self.export_btn.setToolTip(
-            "Exports every project currently shown below (after your search) into ONE Excel "
-            "file, each project on its own tab."
-        )
-        self.export_btn.clicked.connect(self._export_filtered_to_excel)
-        edit_btn = QPushButton(tr("edit"))
-        edit_btn.clicked.connect(self._edit_project)
-        delete_btn = QPushButton(tr("delete"))
-        delete_btn.setObjectName("dangerButton")
-        delete_btn.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_TrashIcon))
-        delete_btn.clicked.connect(self._delete_project)
-        history_btn = QPushButton("\U0001F553 " + tr("history"))
-        history_btn.clicked.connect(self._open_history)
-        open_btn = QPushButton(tr("open_project") + " \u2192")
-        open_btn.setObjectName("primaryButton")
-        open_btn.clicked.connect(self._open_selected_project)
-        btn_row.addWidget(add_btn)
-        btn_row.addWidget(import_btn)
-        btn_row.addWidget(self.export_btn)
-        btn_row.addWidget(edit_btn)
-        btn_row.addWidget(delete_btn)
-        btn_row.addWidget(history_btn)
-        btn_row.addStretch()
-        btn_row.addWidget(open_btn)
-        layout.addLayout(btn_row)
-
-        self.table = EmptyStateTable("No projects yet \u2014 click \u201c+ Add\u201d to create one.")
-        self.table.setColumnCount(len(PROJECT_COLUMNS))
-        self.table.setHorizontalHeaderLabels(PROJECT_COLUMNS)
-        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self.table.setAlternatingRowColors(True)
-        configure_interactive_table(self.table, first_col_width=280, layout_key="projects_table")
-        self.table.doubleClicked.connect(lambda _i: self._open_selected_project())
+        tree_layout.addWidget(self.search_edit)
+        self.project_tree = QTreeWidget()
+        self.project_tree.setObjectName("projectBrowser")
+        self.project_tree.setHeaderHidden(True)
+        self.project_tree.setColumnCount(2)
+        self.project_tree.setColumnWidth(0, 285)
+        self.project_tree.setColumnWidth(1, 45)
+        # The name column is re-fitted to the panel width (see
+        # _fit_name_column) so long project/group names stay fully visible
+        # instead of being cut off with an ellipsis.
+        self.project_tree.viewport().installEventFilter(self)
+        self._fitting_tree_width = False
+        self._tree_width_fitted = False
+        self._fit_name_column()
+        self.project_tree.setMinimumWidth(260)
+        self.project_tree.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.project_tree.currentItemChanged.connect(self._on_tree_selected)
+        self.project_tree.itemExpanded.connect(lambda *_: self._fit_name_column())
+        self.project_tree.itemDoubleClicked.connect(self._open_tree_project)
         for key in (Qt.Key_Return, Qt.Key_Enter):
-            enter_sc = QShortcut(QKeySequence(key), self.table)
-            enter_sc.setContext(Qt.WidgetShortcut)
-            enter_sc.activated.connect(self._open_selected_project)
-        layout.addWidget(self.table)
-
+            shortcut = QShortcut(QKeySequence(key), self.project_tree)
+            shortcut.setContext(Qt.WidgetShortcut)
+            shortcut.activated.connect(self._open_selected_project)
+        tree_layout.addWidget(self.project_tree, 1)
+        self.overview = ProjectOverview()
+        self.overview.open_requested.connect(self._open_selected_project)
+        self.overview.metric_requested.connect(self._open_metric)
+        scroll = QScrollArea()
+        scroll.setObjectName("projectOverviewScroll")
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.NoFrame)
+        scroll.setWidget(self.overview)
+        self.splitter = QSplitter(Qt.Horizontal)
+        # Keep the browser on the left and the overview on the right in both languages.
+        self.splitter.setLayoutDirection(Qt.LeftToRight)
+        tree_panel.setLayoutDirection(self.layoutDirection())
+        self.overview.setLayoutDirection(self.layoutDirection())
+        self.splitter.addWidget(tree_panel)
+        self.splitter.addWidget(scroll)
+        self.splitter.setChildrenCollapsible(False)
+        self.splitter.setStretchFactor(0, 0)
+        self.splitter.setStretchFactor(1, 1)
+        self.splitter.setSizes([460, 880])
+        layout.addWidget(self.splitter, 1)
         self.reload()
 
-    # ------------------------------------------------------------ #
-    def reload(self):
-        self.table.setSortingEnabled(False)
-        projects = list(self.db.get_projects())
-        self._all_projects = projects
-        # One pass over every project's items, reused for all rows below.
-        try:
-            delivery = self.db.get_project_delivery_stats()
-        except Exception:  # noqa: BLE001 - the list must still render
-            delivery = {}
-        self._delivery_stats = delivery
-        self.table.setRowCount(len(projects))
-        for row, p in enumerate(projects):
-            values = [p["name"], p["group_name"] or "", p["project_number"] or "", p["location"] or "",
-                      p["contractor"] or "", p["currency"] or ""]
-            for col, val in enumerate(values):
-                cell = QTableWidgetItem(val)
-                if col == 0:
-                    cell.setData(Qt.UserRole, p["id"])
-                    cell.setData(Qt.UserRole + 1, p["group_id"])
-                self.table.setItem(row, col, cell)
+    def _tree_content_width(self):
+        """Width Qt needs to show every visible project/group name in full."""
+        tree = self.project_tree
+        hint = tree.sizeHintForColumn(0)
+        if hint > 0:
+            return hint
+        cache = {}
+        needed = 0
+        for i in range(tree.topLevelItemCount()):
+            top = tree.topLevelItem(i)
+            nodes = [top] + [top.child(j) for j in range(top.childCount())]
+            for node in nodes:
+                font = node.font(0)
+                fm = cache.get(font.key())
+                if fm is None:
+                    fm = cache[font.key()] = QFontMetrics(font)
+                depth = 0
+                parent = node.parent()
+                while parent is not None:
+                    depth += 1
+                    parent = parent.parent()
+                needed = max(needed, depth * tree.indentation() + 26
+                             + fm.horizontalAdvance(node.text(0)))
+        return needed
 
-            stats = delivery.get(p["id"]) or {"items": 0, "delivered": 0}
-            total = stats["items"]
-            percent = (100.0 * stats["delivered"] / total) if total else 0.0
-            cell = _PercentItem(percent, tooltip=f"{stats['delivered']} / {total}")
-            bg, fg = ratio_chip_colors(percent)
-            cell.setBackground(QColor(bg))
-            cell.setForeground(QColor(fg))
-            self.table.setItem(row, len(PROJECT_COLUMNS) - 1, cell)
-        self.table.setSortingEnabled(True)
-        # Always fall back to alphabetical by project name. Qt otherwise
-        # re-applies whatever sort indicator it still holds (a column the
-        # user clicked earlier, or one restored with the saved layout),
-        # which left the list in an order that looked random.
-        name_col = PROJECT_COLUMNS.index("Name")
-        self.table.sortItems(name_col, Qt.AscendingOrder)
-        self.table.horizontalHeader().setSortIndicator(name_col, Qt.AscendingOrder)
-        self.table.resizeRowsToContents()
-
-        current_group = self.group_filter.currentData() if self.group_filter.count() else None
-        self.group_filter.blockSignals(True)
-        self.group_filter.clear()
-        self.group_filter.addItem("All Groups", None)
-        for g in self.db.get_project_groups():
-            self.group_filter.addItem(g["name"], g["id"])
-        idx = self.group_filter.findData(current_group)
-        self.group_filter.setCurrentIndex(max(idx, 0))
-        self.group_filter.blockSignals(False)
-
-        self._update_stat_cards()
-        self._apply_filter()
-
-    def _update_stat_cards(self):
-        """Fills the KPI strip from the existing cross-project aggregate.
-        A failure here must never break the project list, so it degrades to
-        em-dashes instead."""
-        try:
-            summary = self.db.get_dashboard_summary()
-        except Exception:  # noqa: BLE001 - a KPI strip is never worth a crash
+    def _fit_name_column(self):
+        """Start from the smallest browser width that fits and widen it,
+        step by step, until the longest project/group name is fully
+        visible - names should never end in an ellipsis."""
+        if getattr(self, "_fitting_tree_width", False):
             return
-        status_counts = summary.get("status_counts", {})
+        self._fitting_tree_width = True
+        try:
+            self._fit_name_column_now()
+        except RuntimeError:
+            # The page can be torn down while a resize/fit is still queued.
+            pass
+        finally:
+            self._fitting_tree_width = False
 
-        value_label, value_sub = self.stat_cards["projects"]
-        value_label.setText(f"{summary.get('project_count', 0)}")
-        value_sub.setText(f"{summary.get('item_count', 0)} {tr('stat_items_unit')}")
+    def _fit_name_column_now(self):
+        tree = self.project_tree
+        viewport = tree.viewport().width()
+        if viewport <= 0:
+            return
+        count_col = 45
+        if tree.columnWidth(1) != count_col:
+            tree.setColumnWidth(1, count_col)
+        tree.setColumnWidth(0, max(140, viewport - count_col - 2))
+        needed = self._tree_content_width()
+        if not needed:
+            return
+        sizes = self.splitter.sizes()
+        if len(sizes) != 2:
+            return
+        total = sum(sizes)
+        if total <= 0:
+            return
+        needed_panel = needed + count_col + 40
+        limit = max(280, total - 480)   # keep the overview usable
+        min_width = min(needed_panel, limit)
+        if getattr(self, "_tree_panel", None) is not None:
+            self._tree_panel.setMinimumWidth(min_width)
+        if not self._tree_width_fitted:
+            self._tree_width_fitted = True
+            if abs(sizes[0] - min_width) > 2:
+                self.splitter.setSizes([min_width, total - min_width])
+        elif sizes[0] < min_width - 2:
+            self.splitter.setSizes([min_width, total - min_width])
 
-        value_label, value_sub = self.stat_cards["value"]
-        by_currency = summary.get("value_by_currency", {})
-        if by_currency:
-            top = max(by_currency, key=lambda c: by_currency[c])
-            value_label.setText(_compact_amount(by_currency[top]))
-            value_sub.setText(str(top))
-        else:
-            value_label.setText("\u2014")
-            value_sub.setText("")
+    def eventFilter(self, obj, event):
+        # Keep the browser fitted to its content; ignore late events that
+        # can arrive while the page is being torn down.
+        if event.type() == QEvent.Resize:
+            try:
+                is_viewport = obj is self.project_tree.viewport()
+            except RuntimeError:
+                return False
+            if is_viewport:
+                self._fit_name_column()
+        return super().eventFilter(obj, event)
 
-        value_label, value_sub = self.stat_cards["pending"]
-        value_label.setText(f"{status_counts.get('Not requested', 0)}")
-        value_sub.setText(tr("stat_pending_sub"))
+    def selected_scope(self):
+        node = self.project_tree.currentItem()
+        return node.data(0, Qt.UserRole) if node and not node.isHidden() else ("all", None)
 
-        value_label, value_sub = self.stat_cards["blocked"]
-        value_label.setText(f"{status_counts.get('On Hold', 0)}")
-        value_sub.setText(tr("stat_blocked_sub"))
+    def restore_scope(self, scope):
+        kind, ident = scope
+        node = (self._tree_projects.get(ident) if kind == "project" else
+                self._tree_groups.get(ident) if kind in ("group", "ungrouped") else self.all_node)
+        self.project_tree.setCurrentItem(node or self.all_node)
+        self._refresh_overview()
 
-    def _recolor_delivery_cells(self):
-        """Re-applies the "Delivered %" band colours from the stats cached by
-        reload(). Those colours are cell brushes, not stylesheet rules, so
-        without this they would keep the previous theme's palette until the
-        list happened to be rebuilt."""
-        stats_by_id = getattr(self, "_delivery_stats", {})
-        last = len(PROJECT_COLUMNS) - 1
-        for row in range(self.table.rowCount()):
-            name_item = self.table.item(row, 0)
-            cell = self.table.item(row, last)
-            if name_item is None or cell is None:
+    def reload(self):
+        scope = self.selected_scope()
+        expanded = {self.project_tree.topLevelItem(i).data(0, Qt.UserRole)
+                    for i in range(self.project_tree.topLevelItemCount())
+                    if self.project_tree.topLevelItem(i).isExpanded()}
+        first_load = self.project_tree.topLevelItemCount() == 0
+        self._all_projects = list(self.db.get_projects())
+        self.project_tree.blockSignals(True)
+        self.project_tree.clear()
+        self._tree_projects, self._tree_groups = {}, {}
+        self.all_node = QTreeWidgetItem([tr_text("All Projects"), str(len(self._all_projects))])
+        self.all_node.setData(0, Qt.UserRole, ("all", None))
+        self.project_tree.addTopLevelItem(self.all_node)
+        groups = [(g["id"], g["name"]) for g in self.db.get_project_groups()] + [(None, tr_text("Ungrouped"))]
+        for group_id, name in groups:
+            members = [p for p in self._all_projects if p["group_id"] == group_id]
+            if group_id is None and not members:
                 continue
-            stats = stats_by_id.get(name_item.data(Qt.UserRole)) or {"items": 0, "delivered": 0}
-            total = stats["items"]
-            percent = (100.0 * stats["delivered"] / total) if total else 0.0
-            bg, fg = ratio_chip_colors(percent)
-            cell.setBackground(QColor(bg))
-            cell.setForeground(QColor(fg))
-
-    def on_theme_changed(self):
-        """Called by the main window after a theme switch."""
-        self._update_stat_cards()
-        self._recolor_delivery_cells()
+            node = QTreeWidgetItem([name, str(len(members))])
+            node.setToolTip(0, name)
+            node.setData(0, Qt.UserRole, ("group", group_id) if group_id is not None else ("ungrouped", None))
+            font = node.font(0)
+            font.setBold(True)
+            node.setFont(0, font)
+            self.project_tree.addTopLevelItem(node)
+            self._tree_groups[group_id] = node
+            for project in members:
+                child = QTreeWidgetItem([project["name"]])
+                child.setData(0, Qt.UserRole, ("project", project["id"]))
+                child.setToolTip(0, project["name"])
+                node.addChild(child)
+                self._tree_projects[project["id"]] = child
+            node.setExpanded(first_load or node.data(0, Qt.UserRole) in expanded)
+        kind, ident = scope
+        node = self._tree_projects.get(ident) if kind == "project" else self._tree_groups.get(ident) if kind in ("group", "ungrouped") else self.all_node
+        self.project_tree.setCurrentItem(node or self.all_node)
+        self.project_tree.blockSignals(False)
+        self._apply_filter()
+        self.on_theme_changed()
+        self._fit_name_column()
 
     def _apply_filter(self):
         text = self.search_edit.text().strip().lower()
-        group_id = self.group_filter.currentData()
-        for row in range(self.table.rowCount()):
-            name_item = self.table.item(row, 0)
-            group_item = self.table.item(row, 1)
-            number_item = self.table.item(row, 2)
-            if not text:
-                show = True
-            else:
-                show = (text in (name_item.text().lower() if name_item else "")
-                        or text in (group_item.text().lower() if group_item else "")
-                        or text in (number_item.text().lower() if number_item else ""))
-            if show and group_id is not None:
-                show = name_item and name_item.data(Qt.UserRole + 1) == group_id
-            self.table.setRowHidden(row, not show)
+        for project in getattr(self, "_all_projects", []):
+            node = self._tree_projects[project["id"]]
+            show = not text or any(text in str(project[key] or "").lower() for key in ("name", "group_name", "project_number"))
+            node.setHidden(not show)
+        for node in self._tree_groups.values():
+            node.setHidden(bool(text) and not any(not node.child(i).isHidden() for i in range(node.childCount())))
+            if text and not node.isHidden():
+                node.setExpanded(True)
+        current = self.project_tree.currentItem()
+        if current and current.isHidden():
+            self.project_tree.setCurrentItem(self.all_node)
+        if hasattr(self, "overview"):
+            self._refresh_overview()
+        self._fit_name_column()
+
+    def _on_tree_selected(self, item, _previous):
+        self._refresh_overview()
+
+    def _open_tree_project(self, item, _column):
+        if item and not item.isHidden() and item.data(0, Qt.UserRole)[0] == "project":
+            self.project_opened.emit(item.data(0, Qt.UserRole)[1])
+
+    def _visible_project_ids(self):
+        kind, ident = self.selected_scope()
+        return [p["id"] for p in self._all_projects
+                if not self._tree_projects[p["id"]].isHidden()
+                and (kind == "all" or kind == "project" and p["id"] == ident
+                     or kind == "group" and p["group_id"] == ident
+                     or kind == "ungrouped" and p["group_id"] is None)]
+
+    def _refresh_overview(self):
+        kind, ident = self.selected_scope()
+        project = self.db.get_project(ident) if kind == "project" else None
+        group = self.db.get_project_group(ident) if kind == "group" else None
+        ids = self._visible_project_ids()
+        summary = self.db.get_dashboard_summary(project_ids=ids)
+        title = project["name"] if project else group["name"] if group else tr_text("Ungrouped" if kind == "ungrouped" else "All Projects")
+        context = (project["group_name"] or tr_text("Ungrouped")) if project else tr_text("{count} projects").format(count=len(ids))
+        self.overview.show_summary(title, context, summary, project=project, group=group)
+        is_manager = auth.is_manager(self.db)
+        for action in self.project_actions:
+            action.setEnabled(project is not None
+                              and (is_manager or action is self.project_actions[1]))
+
+    def on_theme_changed(self):
+        tokens = DARK_TOKENS if get_theme() == "dark" else LIGHT_TOKENS
+        for node in self._tree_groups.values():
+            node.setIcon(0, make_icon("folder", tokens["accent"]))
+        for node in self._tree_projects.values():
+            node.setIcon(0, make_icon("list", tokens["muted"]))
+
+    def _open_metric(self, key):
+        status = {"items": "", "delivered": "Delivered", "pending": "Not requested",
+                  "blocked": "On Hold"}[key]
+        project_id = self.selected_project_id()
+        if project_id is not None:
+            self.items_requested.emit(project_id, status)
+            return
+        dialog = ReviewItemsDialog(self.db, self._visible_project_ids(), parent=self, status=status or None)
+        dialog.item_opened.connect(self.item_opened)
+        dialog.exec()
+
+    def selected_project_id(self):
+        kind, ident = self.selected_scope()
+        return ident if kind == "project" else None
 
     def _selected_project_id(self):
-        row = self.table.currentRow()
-        if row < 0:
+        project_id = self.selected_project_id()
+        if project_id is None:
             QMessageBox.information(self, tr("no_project_selected"), tr("select_project_first"))
-            return None
-        return self.table.item(row, 0).data(Qt.UserRole)
+        return project_id
+
+    def select_project(self, project_id):
+        node = self._tree_projects.get(project_id)
+        if node is None:
+            return False
+        if node.isHidden():
+            self.search_edit.clear()
+        node.parent().setExpanded(True)
+        self.project_tree.setCurrentItem(node)
+        self.project_tree.scrollToItem(node)
+        self._refresh_overview()
+        return True
+
+    def _open_selected_project(self):
+        project_id = self._selected_project_id()
+        if project_id is not None:
+            self.project_opened.emit(project_id)
 
     def _add_project(self):
+        if not auth.is_manager(self.db):
+            return
         dlg = ProjectDialog(self, db=self.db)
-        if dlg.exec():
+        kind, ident = self.selected_scope()
+        project = self.db.get_project(ident) if kind == "project" else None
+        group_id = project["group_id"] if project else ident if kind == "group" else None
+        if isinstance(group_id, int):
+            dlg.group_combo.setCurrentIndex(max(0, dlg.group_combo.findData(group_id)))
+        if dlg.exec() and auth.is_manager(self.db):
             data = dlg.get_data()
             new_id = self.db.add_project(**data)
+            if auth.is_manager(self.db):
+                self.db.set_project_assignee(new_id, dlg.selected_assignee_id())
             self.search_edit.clear()  # a stale search filter could hide the new project we're about to select
             self.reload()
-            self._select_row_by_id(new_id)
+            self.select_project(new_id)
 
     def _edit_project(self):
+        if not auth.is_manager(self.db):
+            return
         pid = self._selected_project_id()
         if pid is None:
             return
         project = self.db.get_project(pid)
         dlg = ProjectDialog(self, project=project, db=self.db)
-        if dlg.exec():
+        if dlg.exec() and auth.is_manager(self.db):
             self.db.update_project(pid, **dlg.get_data())
+            if auth.is_manager(self.db):
+                self.db.set_project_assignee(pid, dlg.selected_assignee_id())
             self.reload()
-            self._select_row_by_id(pid)
+            self.select_project(pid)
+
+    def _open_users(self):
+        if not auth.is_manager(self.db):
+            QMessageBox.information(self, tr_text("Users"), tr_text("Only the manager can manage user accounts."))
+            return
+        UsersDialog(self, self.db).exec()
 
     def _delete_project(self):
+        if not auth.is_manager(self.db):
+            return
         pid = self._selected_project_id()
         if pid is None:
             return
@@ -404,16 +520,22 @@ class ProjectsPage(QWidget):
         self.reload()
 
         def _undo():
+            if not auth.is_manager(self.db):
+                return
             self.db.restore_project(pid)
             self.reload()
 
         self.undo_bar.show_message(f"Project '{project['name']}' deleted.", _undo)
 
     def _open_trash(self):
+        if not auth.is_manager(self.db):
+            return
         dlg = TrashDialog(self, self.db, on_change=self.reload)
         dlg.exec()
 
     def _open_manage_groups(self):
+        if not auth.is_manager(self.db):
+            return
         dlg = ManageGroupsDialog(self, self.db)
         dlg.exec()
         self.reload()  # a rename/delete may have changed what's shown
@@ -428,25 +550,14 @@ class ProjectsPage(QWidget):
         dlg.exec()
 
     def _open_import_excel(self):
+        if not auth.is_manager(self.db):
+            return
         dlg = ImportExcelDialog(self, self.db)
         if dlg.exec():
             self.reload()
             project_id = dlg.imported_project_id()
             if project_id is not None:
                 self.project_opened.emit(project_id)
-
-    def _visible_project_ids(self):
-        """Ids of every project row currently shown (i.e. not hidden by
-        the search filter), in their current on-screen top-to-bottom
-        order."""
-        ids = []
-        for row in range(self.table.rowCount()):
-            if self.table.isRowHidden(row):
-                continue
-            name_item = self.table.item(row, 0)
-            if name_item:
-                ids.append(name_item.data(Qt.UserRole))
-        return ids
 
     def _export_filtered_to_excel(self):
         project_ids = self._visible_project_ids()
@@ -489,43 +600,3 @@ class ProjectsPage(QWidget):
         worker.finished_err.connect(_on_err)
         self._export_worker = worker  # keep a reference so it isn't garbage-collected mid-run
         worker.start()
-
-    def _select_row_by_id(self, project_id):
-        for row in range(self.table.rowCount()):
-            if self.table.item(row, 0).data(Qt.UserRole) == project_id:
-                self.table.selectRow(row)
-                self.table.scrollToItem(self.table.item(row, 0))
-                self.table.setFocus()
-                break
-
-    def _row_for_project_id(self, project_id):
-        """The on-screen row currently holding this project id."""
-        for row in range(self.table.rowCount()):
-            cell = self.table.item(row, 0)
-            if cell is not None and cell.data(Qt.UserRole) == project_id:
-                return row
-        return None
-
-    def select_project(self, project_id):
-        """Selects and scrolls to a project, so coming back from the items
-        screen lands on the project the user was working in.
-
-        If a search filter is hiding that project it is cleared first -
-        otherwise the selection would be invisible."""
-        row = self._row_for_project_id(project_id)
-        if row is None:
-            return False
-        if self.table.isRowHidden(row) and self.search_edit.text().strip():
-            self.search_edit.clear()   # triggers _apply_filter
-        self._select_row_by_id(project_id)
-        return True
-
-    def selected_project_id(self):
-        """Public accessor used by the reports (e.g. to pre-fill the scope)."""
-        return self._selected_project_id()
-
-    def _open_selected_project(self):
-        pid = self._selected_project_id()
-        if pid is None:
-            return
-        self.project_opened.emit(pid)

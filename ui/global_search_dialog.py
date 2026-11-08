@@ -5,6 +5,8 @@ without opening each one individually. Double-click (or Enter) a result
 to jump straight to that project with the item selected.
 """
 
+from i18n import tr_text
+
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton,
     QTableWidget, QTableWidgetItem, QAbstractItemView, QHeaderView,
@@ -23,14 +25,14 @@ class GlobalSearchDialog(QDialog):
         super().__init__(parent)
         self.db = db
 
-        self.setWindowTitle("Search All Projects")
+        self.setWindowTitle(tr_text("Search All Projects"))
         self.setMinimumSize(680, 440)
 
         layout = QVBoxLayout(self)
 
         search_row = QHBoxLayout()
         self.search_edit = QLineEdit()
-        self.search_edit.setPlaceholderText("Search item name, area, supplier, remarks, unit, status\u2026")
+        self.search_edit.setPlaceholderText(tr_text("Search item name, area, supplier, remarks, unit, status\u2026"))
         # Debounce: the search scans every item of every project in the
         # scope, so run it once the user pauses typing instead of on
         # literally every keystroke.
@@ -44,11 +46,11 @@ class GlobalSearchDialog(QDialog):
         layout.addLayout(search_row)
 
         scope_row = QHBoxLayout()
-        scope_row.addWidget(QLabel("Search in:"))
+        scope_row.addWidget(QLabel(tr_text("Search in:")))
         self.scope_combo = QComboBox()
-        self.scope_combo.addItem("All projects", ("all", None))
+        self.scope_combo.addItem(tr_text("All projects"), ("all", None))
         for g in self.db.get_project_groups():
-            self.scope_combo.addItem(f"\U0001F4C1 {g['name']} (Group)", ("group", g["id"]))
+            self.scope_combo.addItem(f"{g['name']} ({tr_text('Group')})", ("group", g["id"]))
         for p in self.db.get_projects():
             self.scope_combo.addItem(p["name"], ("project", p["id"]))
         self.scope_combo.currentIndexChanged.connect(lambda _i: self._search_timer.start())
@@ -56,34 +58,34 @@ class GlobalSearchDialog(QDialog):
         layout.addLayout(scope_row)
 
         fields_row = QHBoxLayout()
-        fields_row.addWidget(QLabel("Match on:"))
+        fields_row.addWidget(QLabel(tr_text("Match on:")))
         self.field_checks = {}
         for key, label in self.db.SEARCHABLE_ITEM_FIELDS:
-            cb = QCheckBox(label)
+            cb = QCheckBox(tr_text(label))
             cb.setChecked(True)
             cb.stateChanged.connect(lambda _s: self._search_timer.start())
             fields_row.addWidget(cb)
             self.field_checks[key] = cb
         fields_row.addStretch()
-        all_btn = QPushButton("All")
+        all_btn = QPushButton(tr_text("All"))
         all_btn.clicked.connect(lambda: self._set_all_fields(True))
-        none_btn = QPushButton("None")
+        none_btn = QPushButton(tr_text("None"))
         none_btn.clicked.connect(lambda: self._set_all_fields(False))
         fields_row.addWidget(all_btn)
         fields_row.addWidget(none_btn)
         layout.addLayout(fields_row)
 
         mode_row = QHBoxLayout()
-        mode_row.addWidget(QLabel("Match mode:"))
+        mode_row.addWidget(QLabel(tr_text("Match mode:")))
         self.mode_combo = QComboBox()
-        self.mode_combo.addItem("Contains all words (any order)", "include")
-        self.mode_combo.addItem("Contains exact phrase", "contains")
-        self.mode_combo.addItem("Exact match", "equal")
+        self.mode_combo.addItem(tr_text("Contains all words (any order)"), "include")
+        self.mode_combo.addItem(tr_text("Contains exact phrase"), "contains")
+        self.mode_combo.addItem(tr_text("Exact match"), "equal")
         self.mode_combo.setToolTip(
-            "\u201cContains all words\u201d finds a cell that has every word you typed, in any order and "
+            tr_text("\u201cContains all words\u201d finds a cell that has every word you typed, in any order and "
             "even with different punctuation \u2014 e.g. searching \u201cA B C\u201d finds \u201cB, A, C\u201d too. "
             "\u201cContains exact phrase\u201d requires that exact wording in that exact order. "
-            "\u201cExact match\u201d requires the whole field to equal what you typed, nothing more."
+            "\u201cExact match\u201d requires the whole field to equal what you typed, nothing more.")
         )
         self.mode_combo.currentIndexChanged.connect(lambda _i: self._search_timer.start())
         mode_row.addWidget(self.mode_combo, 1)
@@ -92,7 +94,7 @@ class GlobalSearchDialog(QDialog):
         self.results_table = QTableWidget()
         self.results_table.setColumnCount(6)
         self.results_table.setHorizontalHeaderLabels(
-            ["Item Name", "Project", "Area", "Status", "Total Qty", "Matched In"])
+            [tr_text(label) for label in ["Item Name", "Project", "Area", "Status", "Total Qty", "Matched In"]])
         self.results_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.results_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.results_table.setSelectionMode(QAbstractItemView.SingleSelection)
@@ -100,19 +102,19 @@ class GlobalSearchDialog(QDialog):
         self.results_table.doubleClicked.connect(lambda _i: self._choose_current())
         layout.addWidget(self.results_table)
 
-        self.status_label = QLabel("Type at least 2 characters to search.")
+        self.status_label = QLabel(tr_text("Type at least 2 characters to search."))
         layout.addWidget(self.status_label)
 
         btn_row = QHBoxLayout()
-        self.export_btn = QPushButton("\U0001F4E4 Export Results to Excel")
+        self.export_btn = QPushButton(tr_text("\U0001F4E4 Export Results to Excel"))
         self.export_btn.setEnabled(False)
         self.export_btn.clicked.connect(self._export_results)
         btn_row.addWidget(self.export_btn)
         btn_row.addStretch()
-        open_btn = QPushButton("Open \u2192")
+        open_btn = QPushButton(tr_text("Open \u2192"))
         open_btn.setObjectName("primaryButton")
         open_btn.clicked.connect(self._choose_current)
-        close_btn = QPushButton("Close")
+        close_btn = QPushButton(tr_text("Close"))
         close_btn.clicked.connect(self.reject)
         btn_row.addWidget(close_btn)
         btn_row.addWidget(open_btn)
@@ -165,7 +167,7 @@ class GlobalSearchDialog(QDialog):
         for row, r in enumerate(self._results):
             matched = r.get("matched_fields", [])
             values = [r["item_name"], r["project_name"], r["pump_station"] or "-",
-                      r["status"], f"{r['total_quantity'] or 0:,.2f}", ", ".join(matched)]
+                      tr_text(r["status"]), f"{r['total_quantity'] or 0:,.2f}", ", ".join(tr_text(label) for label in matched)]
             for col, val in enumerate(values):
                 item = QTableWidgetItem(str(val))
                 if col == 0:

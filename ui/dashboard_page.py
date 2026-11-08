@@ -7,16 +7,20 @@ much pricing data is still missing, and which "Not requested" items
 have sat untouched the longest (possibly forgotten).
 """
 
+from i18n import tr_text
+
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QGridLayout,
     QFrame, QTableWidget, QTableWidgetItem, QAbstractItemView, QHeaderView,
     QFileDialog, QMessageBox, QTreeWidget, QTreeWidgetItem, QSplitter,
-    QProgressBar,
+    QProgressBar, QCheckBox,
 )
 from PySide6.QtCore import Qt, Signal, QByteArray, QTimer, QSettings
 from PySide6.QtGui import QPainter
 
 from i18n import tr
+from ui.widgets import ActionCard
+from ui.review_items_dialog import ReviewItemsDialog
 from ui.table_utils import configure_interactive_table, ExportWorker, EmptyStateTable
 from export.excel_export import (
     export_projects_combined_to_excel, export_items_for_cost_update, export_stale_items_to_excel,
@@ -42,15 +46,16 @@ _STATUS_PIE_COLORS = {
 _FALLBACK_COLORS = ["#60A5FA", "#34D399", "#FBBF24", "#F87171", "#A78BFA", "#F472B6", "#38BDF8"]
 
 
-def _stat_card(title, value_text, severity=None):
-    card = QFrame()
+def _stat_card(title, value_text, severity=None, actionable=True):
+    card = ActionCard() if actionable else QFrame()
     card.setObjectName("statCard")
     if severity:
         card.setProperty("severity", severity)  # "warn" | "bad" — picked up by the stylesheet
     layout = QVBoxLayout(card)
     value_label = QLabel(value_text)
     value_label.setObjectName("statValue")
-    title_label = QLabel(title)
+    title_label = QLabel(tr_text(title))
+    card.setAccessibleName(tr_text(title))
     title_label.setObjectName("breadcrumb")
     layout.addWidget(value_label)
     layout.addWidget(title_label)
@@ -86,12 +91,16 @@ class DashboardPage(QWidget):
 
         # ---- Left: project picker (which project(s) this dashboard covers) ----
         picker_box = QVBoxLayout()
-        picker_box.addWidget(QLabel("<b>Projects</b>"))
-        picker_hint = QLabel("Nothing checked = all projects combined. Check a Main Project "
-                              "to include all of its projects at once.")
+        picker_box.addWidget(QLabel(tr_text("<b>Projects</b>")))
+        picker_hint = QLabel(tr_text("Choose all projects or select projects from the list."))
         picker_hint.setObjectName("breadcrumb")
         picker_hint.setWordWrap(True)
         picker_box.addWidget(picker_hint)
+        self.all_projects_check = QCheckBox(tr_text("All Projects"))
+        default_all = not bool(self._saved_scope())
+        self.all_projects_check.setChecked(self._settings.value("dashboard_all_projects", default_all, type=bool))
+        self.all_projects_check.toggled.connect(self._on_all_projects_changed)
+        picker_box.addWidget(self.all_projects_check)
 
         self.project_tree = QTreeWidget()
         self.project_tree.setHeaderHidden(True)
@@ -100,60 +109,60 @@ class DashboardPage(QWidget):
         picker_box.addWidget(self.project_tree, 1)
 
         picker_btn_row = QHBoxLayout()
-        select_all_btn = QPushButton("Select All")
+        select_all_btn = QPushButton(tr_text("Select All"))
         select_all_btn.clicked.connect(lambda: self._set_all_checked(True))
-        clear_btn = QPushButton("Clear")
+        clear_btn = QPushButton(tr_text("Clear"))
         clear_btn.clicked.connect(lambda: self._set_all_checked(False))
         picker_btn_row.addWidget(select_all_btn)
         picker_btn_row.addWidget(clear_btn)
         picker_box.addLayout(picker_btn_row)
 
-        self.export_checked_btn = QPushButton("\U0001F4E4 Export Checked \u2192 One Sheet")
+        self.export_checked_btn = QPushButton(tr_text("Export Selected Projects"))
         self.export_checked_btn.setToolTip(
-            "Exports every item from the checked project(s) into ONE combined Excel sheet "
-            "(not one tab per project) \u2014 for comparing them side by side."
+            tr_text("Exports every item from the checked project(s) into ONE combined Excel sheet "
+            "(not one tab per project) \u2014 for comparing them side by side.")
         )
         self.export_checked_btn.clicked.connect(self._export_checked_projects)
         picker_box.addWidget(self.export_checked_btn)
 
-        picker_box.addWidget(QLabel("<b>Bulk Price Update</b>"))
-        self.export_costs_btn = QPushButton("\U0001F4E4 Export for Cost Update")
+        picker_box.addWidget(QLabel(tr_text("<b>Bulk Price Update</b>")))
+        self.export_costs_btn = QPushButton(tr_text("\U0001F4E4 Export for Cost Update"))
         self.export_costs_btn.setToolTip(
-            "Exports every item from the checked project(s) with an editable Unit Cost column \u2014 "
+            tr_text("Exports every item from the checked project(s) with an editable Unit Cost column \u2014 "
             "fill in prices in Excel (much faster than one item at a time), then use "
-            "\u201cImport Cost Updates\u201d below to apply them."
+            "\u201cImport Cost Updates\u201d below to apply them.")
         )
         self.export_costs_btn.clicked.connect(self._export_for_cost_update)
         picker_box.addWidget(self.export_costs_btn)
 
-        self.import_costs_btn = QPushButton("\U0001F4E5 Import Cost Updates")
+        self.import_costs_btn = QPushButton(tr_text("\U0001F4E5 Import Cost Updates"))
         self.import_costs_btn.setToolTip(
-            "Reads a file you filled in (from Export for Cost Update) and applies the prices back. "
-            "A blank Unit Cost cell is left untouched, so you can fill prices in over several sessions."
+            tr_text("Reads a file you filled in (from Export for Cost Update) and applies the prices back. "
+            "A blank Unit Cost cell is left untouched, so you can fill prices in over several sessions.")
         )
         self.import_costs_btn.clicked.connect(self._import_cost_updates)
         picker_box.addWidget(self.import_costs_btn)
 
-        picker_box.addWidget(QLabel("<b>Share Reports</b>"))
-        self.export_summary_pdf_btn = QPushButton("\U0001F4C4 Dashboard Summary (PDF)")
+        picker_box.addWidget(QLabel(tr_text("<b>Share Reports</b>")))
+        self.export_summary_pdf_btn = QPushButton(tr_text("\U0001F4C4 Dashboard Summary (PDF)"))
         self.export_summary_pdf_btn.setToolTip(
-            "A clean, professional PDF for sharing with management or a consultant \u2014 the stat cards, "
-            "status breakdown, and estimated value by currency (no item-level list)."
+            tr_text("A clean, professional PDF for sharing with management or a consultant \u2014 the stat cards, "
+            "status breakdown, and estimated value by currency (no item-level list).")
         )
         self.export_summary_pdf_btn.clicked.connect(self._export_summary_pdf)
         picker_box.addWidget(self.export_summary_pdf_btn)
 
-        self.export_stale_pdf_btn = QPushButton("\U0001F4C4 Possibly Forgotten (PDF)")
+        self.export_stale_pdf_btn = QPushButton(tr_text("\U0001F4C4 Possibly Forgotten (PDF)"))
         self.export_stale_pdf_btn.setToolTip(
-            "Just the \u201cPossibly Forgotten\u201d item list, as its own document \u2014 for sharing that on its "
-            "own without the rest of the dashboard."
+            tr_text("Just the \u201cPossibly Forgotten\u201d item list, as its own document \u2014 for sharing that on its "
+            "own without the rest of the dashboard.")
         )
         self.export_stale_pdf_btn.clicked.connect(self._export_stale_pdf)
         picker_box.addWidget(self.export_stale_pdf_btn)
 
-        self.export_stale_excel_btn = QPushButton("\U0001F4CA Possibly Forgotten (Excel)")
+        self.export_stale_excel_btn = QPushButton(tr_text("\U0001F4CA Possibly Forgotten (Excel)"))
         self.export_stale_excel_btn.setToolTip(
-            "The same \u201cPossibly Forgotten\u201d list, saved as an Excel sheet instead of a PDF."
+            tr_text("The same \u201cPossibly Forgotten\u201d list, saved as an Excel sheet instead of a PDF.")
         )
         self.export_stale_excel_btn.clicked.connect(self._export_stale_excel)
         picker_box.addWidget(self.export_stale_excel_btn)
@@ -188,26 +197,37 @@ class DashboardPage(QWidget):
         )
 
         header_row = QHBoxLayout()
-        title = QLabel("Dashboard")
+        title = QLabel(tr_text("Dashboard"))
         title.setObjectName("pageTitle")
         header_row.addWidget(title)
         header_row.addStretch()
-        refresh_btn = QPushButton("\u21BB Refresh")
+        refresh_btn = QPushButton(tr_text("\u21BB Refresh"))
         refresh_btn.clicked.connect(self.reload)
         header_row.addWidget(refresh_btn)
         layout.addLayout(header_row)
+        self.scope_label = QLabel()
+        self.scope_label.setObjectName("breadcrumb")
+        self.scope_label.setWordWrap(True)
+        layout.addWidget(self.scope_label)
 
         # ---- Stat cards ----
         cards_row = QGridLayout()
         cards_row.setSpacing(10)
-        self.card_projects, self.val_projects = _stat_card("Projects Shown", "0")
+        self.card_projects, self.val_projects = _stat_card("Projects Shown", "0", actionable=False)
         self.card_items, self.val_items = _stat_card("Total Items", "0")
         self.card_missing_cost, self.val_missing_cost = _stat_card("Missing Unit Cost", "0")
         self.card_stale, self.val_stale = _stat_card("Stale Items", "0")
+        self.card_documents, self.val_documents = _stat_card("Missing Documents", "0")
         cards_row.addWidget(self.card_projects, 0, 0)
         cards_row.addWidget(self.card_items, 0, 1)
         cards_row.addWidget(self.card_missing_cost, 0, 2)
         cards_row.addWidget(self.card_stale, 0, 3)
+        cards_row.addWidget(self.card_documents, 0, 4)
+        for card, criterion in ((self.card_items, "all"),
+                                (self.card_missing_cost, "missing_cost"), (self.card_stale, "stale"),
+                                (self.card_documents, "missing_documents")):
+            card.setToolTip(tr_text("Click to review the matching items"))
+            card.clicked.connect(lambda value=criterion: self._review_items(value))
         layout.addLayout(cards_row)
 
         # ---- Bento row: three equal cards side by side. The same widgets as
@@ -224,7 +244,7 @@ class DashboardPage(QWidget):
         status_box = QVBoxLayout(status_card)
         status_box.setContentsMargins(14, 12, 14, 12)
         status_box.setSpacing(8)
-        status_box.addWidget(QLabel("<b>Items by Status</b>"))
+        status_box.addWidget(QLabel(tr_text("<b>Items by Status</b>")))
         # A horizontal breakdown rather than a pie: this app's data can sit
         # entirely in one status (everything "Not requested"), and a pie then
         # draws a meaningless full circle while the bars stay informative and
@@ -242,7 +262,7 @@ class DashboardPage(QWidget):
         value_box = QVBoxLayout(value_card)
         value_box.setContentsMargins(14, 12, 14, 12)
         value_box.setSpacing(8)
-        value_box.addWidget(QLabel("<b>Estimated Value by Currency</b>"))
+        value_box.addWidget(QLabel(tr_text("<b>Estimated Value by Currency</b>")))
         # Amounts as large legible rows, not a two-column table: measured,
         # the table put the currency code at x 35..57 and the amount at
         # x 374..397 - a ~317px void between them in a 12.5px font, so the
@@ -261,15 +281,15 @@ class DashboardPage(QWidget):
         stale_box.setContentsMargins(14, 12, 14, 12)
         stale_box.setSpacing(8)
         stale_label = QLabel(
-            "<b>Possibly Forgotten</b><br>still \u201cNot requested\u201d with no activity "
-            "for 14+ days. Double-click to open."
+            tr_text("<b>Possibly Forgotten</b><br>still \u201cNot requested\u201d with no activity "
+            "for 14+ days. Double-click to open.")
         )
         stale_label.setObjectName("breadcrumb")
         stale_label.setWordWrap(True)
         stale_box.addWidget(stale_label)
-        self.stale_table = EmptyStateTable("\U0001F389 Nothing forgotten \u2014 every item has had recent activity.")
+        self.stale_table = EmptyStateTable(tr_text("\U0001F389 Nothing forgotten \u2014 every item has had recent activity."))
         self.stale_table.setColumnCount(4)
-        self.stale_table.setHorizontalHeaderLabels(["Item Name", "Project", "Area", "Days Untouched"])
+        self.stale_table.setHorizontalHeaderLabels([tr_text(label) for label in ["Item Name", "Project", "Area", "Days Untouched"]])
         # "Days Untouched" values are right-aligned - the header should match.
         self.stale_table.horizontalHeaderItem(3).setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
         self.stale_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
@@ -353,7 +373,9 @@ class DashboardPage(QWidget):
         table._cols_fitting = True
         try:
             for col, weight in enumerate(weights):
-                table.setColumnWidth(col, max(90, int(width * weight / total)))
+                heading = table.horizontalHeaderItem(col)
+                minimum = table.fontMetrics().horizontalAdvance(heading.text()) + 36 if heading else 90
+                table.setColumnWidth(col, max(minimum, int(width * weight / total)))
         finally:
             table._cols_fitting = False
 
@@ -367,6 +389,9 @@ class DashboardPage(QWidget):
 
     # ------------------------------------------------------------------ #
     def _set_all_checked(self, checked):
+        self.all_projects_check.blockSignals(True)
+        self.all_projects_check.setChecked(False)
+        self.all_projects_check.blockSignals(False)
         state = Qt.Checked if checked else Qt.Unchecked
         self.project_tree.blockSignals(True)
         for i in range(self.project_tree.topLevelItemCount()):
@@ -383,6 +408,8 @@ class DashboardPage(QWidget):
     def _export_checked_projects(self):
         project_ids = self._selected_project_ids()
         if project_ids is None:
+            project_ids = [project["id"] for project in self.db.get_projects()]
+        if not project_ids:
             QMessageBox.information(self, "No projects checked",
                                      "Check one or more projects in the list on the left first.")
             return
@@ -420,6 +447,8 @@ class DashboardPage(QWidget):
     def _export_for_cost_update(self):
         project_ids = self._selected_project_ids()
         if project_ids is None:
+            project_ids = [project["id"] for project in self.db.get_projects()]
+        if not project_ids:
             QMessageBox.information(self, "No projects checked",
                                      "Check one or more projects in the list on the left first.")
             return
@@ -468,19 +497,59 @@ class DashboardPage(QWidget):
 
         result_holder = {}
 
+        def _do_preview():
+            result_holder["preview"] = import_cost_updates_from_excel(self.db, path, dry_run=True)
+
         def _do_import():
             result_holder["result"] = import_cost_updates_from_excel(self.db, path)
+
+        def _on_preview():
+            self._cost_import_worker = None
+            preview = result_holder["preview"]
+            # Nothing would change, or the user declined: report the dry run
+            # and stop without writing anything.
+            if not preview["changes"] or not self._confirm_cost_changes(preview):
+                result_holder["result"] = preview
+                _on_ok()
+                return
+            worker = ExportWorker(_do_import)
+            worker.finished_ok.connect(_on_ok)
+            worker.finished_err.connect(_on_err)
+            self._cost_import_worker = worker
+            worker.start()
 
         def _on_ok():
             self.import_costs_btn.setEnabled(True)
             self.import_costs_btn.setText(original_text)
             r = result_holder["result"]
-            lines = [f"\u2705 Updated {r['updated']} item(s)."]
+            if r.get("dry_run"):
+                lines = [tr_text("No prices were changed.")]
+            else:
+                lines = [f"\u2705 Updated {r['updated']} item(s)."]
+            if r.get("unchanged"):
+                lines.append(tr_text("{count} item(s) already had that price.").format(count=r["unchanged"]))
+            if r.get("mismatched"):
+                lines.append("\u26a0 " + tr_text(
+                    "Skipped {count} row(s): the Item ID belongs to a different item in this "
+                    "data folder (was the file exported from another copy?)."
+                ).format(count=len(r["mismatched"])))
             if r["skipped_blank"]:
                 lines.append(f"\u2013 {r['skipped_blank']} left unchanged (blank Unit Cost).")
             if r["not_found"]:
                 lines.append(f"\u26A0 {r['not_found']} row(s) referred to an item that no longer exists.")
-            QMessageBox.information(self, "Import complete", "\n".join(lines))
+            if r.get("forbidden"):
+                lines.append(tr_text("Skipped {count} item(s) because you do not have permission to edit their projects.")
+                             .format(count=r["forbidden"]))
+            if r.get("invalid"):
+                lines.append(tr_text("Skipped {count} invalid or incomplete rows.").format(count=len(r["invalid"])))
+            message = QMessageBox(self)
+            message.setWindowTitle(tr_text("Import complete"))
+            message.setIcon(QMessageBox.Information)
+            message.setText("\n".join(lines))
+            details = list(r.get("mismatched") or []) + list(r.get("invalid") or [])
+            if details:
+                message.setDetailedText("\n".join(details))
+            message.exec()
             self.reload()
             self._cost_import_worker = None
 
@@ -490,11 +559,33 @@ class DashboardPage(QWidget):
             QMessageBox.critical(self, "Import failed", err)
             self._cost_import_worker = None
 
-        worker = ExportWorker(_do_import)
-        worker.finished_ok.connect(_on_ok)
+        worker = ExportWorker(_do_preview)
+        worker.finished_ok.connect(_on_preview)
         worker.finished_err.connect(_on_err)
         self._cost_import_worker = worker
         worker.start()
+
+    def _confirm_cost_changes(self, preview):
+        """Shows exactly which prices the file would change and asks before
+        writing anything. Returns True to apply."""
+        changes = preview["changes"]
+        box = QMessageBox(self)
+        box.setWindowTitle(tr_text("Import Cost Updates"))
+        box.setIcon(QMessageBox.Question)
+        text = tr_text("{count} item price(s) will change. Apply these changes?").format(count=len(changes))
+        if preview.get("mismatched"):
+            text += "\n\n⚠ " + tr_text(
+                "Skipped {count} row(s): the Item ID belongs to a different item in this "
+                "data folder (was the file exported from another copy?)."
+            ).format(count=len(preview["mismatched"]))
+        box.setText(text)
+        box.setDetailedText("\n".join(
+            f"{c['project_name']} — {c['item_name']}: {c['old']:,.2f} → {c['new']:,.2f}"
+            for c in changes
+        ))
+        box.setStandardButtons(QMessageBox.Yes | QMessageBox.Cancel)
+        box.setDefaultButton(QMessageBox.Cancel)
+        return box.exec() == QMessageBox.Yes
 
     def _current_scope_label(self):
         """A readable label for whatever's currently checked — a Group
@@ -503,7 +594,9 @@ class DashboardPage(QWidget):
         as part of the suggested filename."""
         project_ids = self._selected_project_ids()
         if project_ids is None:
-            return "All Projects"
+            return tr_text("All Projects")
+        if not project_ids:
+            return tr_text("No projects selected")
         if len(project_ids) == 1:
             p = self.db.get_project(project_ids[0])
             return p["name"] if p else "Selected Project"
@@ -511,7 +604,7 @@ class DashboardPage(QWidget):
             members = {p["id"] for p in self.db.get_projects_in_group(g["id"])}
             if members and members == set(project_ids):
                 return g["name"]
-        return f"Custom Selection ({len(project_ids)} projects)"
+        return tr_text("Custom Selection ({count} projects)").format(count=len(project_ids))
 
     def _export_summary_pdf(self):
         project_ids = self._selected_project_ids()
@@ -622,6 +715,8 @@ class DashboardPage(QWidget):
         text next to the picker. Only leaf (project) items carry a
         project id in Qt.UserRole; group/Ungrouped header items don't,
         so this naturally only ever collects real project ids."""
+        if self.all_projects_check.isChecked():
+            return None
         ids = []
 
         def walk(item):
@@ -633,7 +728,7 @@ class DashboardPage(QWidget):
 
         for i in range(self.project_tree.topLevelItemCount()):
             walk(self.project_tree.topLevelItem(i))
-        return ids or None
+        return ids
 
     def _build_group_node(self, label, members, previously_checked, italic=False):
         node = QTreeWidgetItem([label])
@@ -673,6 +768,11 @@ class DashboardPage(QWidget):
 
     def _save_scope(self, ids):
         self._settings.setValue(self.SCOPE_SETTING, ",".join(str(i) for i in sorted(ids)))
+        self._settings.setValue("dashboard_all_projects", self.all_projects_check.isChecked())
+
+    def _on_all_projects_changed(self, *_):
+        self._settings.setValue("dashboard_all_projects", self.all_projects_check.isChecked())
+        self._recompute()
 
     def _reload_project_tree(self):
         previously_checked = set(self._selected_project_ids() or [])
@@ -696,7 +796,7 @@ class DashboardPage(QWidget):
             self.project_tree.addTopLevelItem(node)
 
         if ungrouped:
-            node = self._build_group_node("Ungrouped", ungrouped, previously_checked, italic=True)
+            node = self._build_group_node(tr_text("Ungrouped"), ungrouped, previously_checked, italic=True)
             self.project_tree.addTopLevelItem(node)
 
         self.project_tree.blockSignals(False)
@@ -704,6 +804,9 @@ class DashboardPage(QWidget):
     def _on_tree_item_changed(self, item, _column):
         if self._tree_updating:
             return
+        self.all_projects_check.blockSignals(True)
+        self.all_projects_check.setChecked(False)
+        self.all_projects_check.blockSignals(False)
         self._tree_updating = True
         try:
             state = item.checkState(0)
@@ -745,8 +848,18 @@ class DashboardPage(QWidget):
         checkbox toggle so ticking one box doesn't rebuild/flicker the
         whole list."""
         project_ids = self._selected_project_ids()
+        self.scope_label.setText(tr_text("Scope: {scope}").format(scope=self._current_scope_label()))
         summary = self.db.get_dashboard_summary(project_ids=project_ids)
         total_items = summary["item_count"]
+        projects = [p for p in self.db.get_projects() if project_ids is None or p["id"] in project_ids]
+        grouped = self.db.get_items_for_projects([p["id"] for p in projects])
+        missing_documents = 0
+        for project in projects:
+            categories = self.db.get_item_attachment_categories(project["id"])
+            missing_documents += sum(not {"PR", "PO"}.issubset(categories.get(item["id"], set()))
+                                     for item in grouped.get(project["id"], []))
+        self.val_documents.setText(str(missing_documents))
+        self._set_card_severity(self.card_documents, "warn" if missing_documents else None)
 
         self.val_projects.setText(str(summary["project_count"]))
         self.val_items.setText(str(total_items))
@@ -783,6 +896,11 @@ class DashboardPage(QWidget):
         self.stale_table.resizeRowsToContents()
         self.stale_table.viewport().update()
         self._fit_dashboard_columns()
+
+    def _review_items(self, criterion):
+        dialog = ReviewItemsDialog(self.db, self._selected_project_ids(), criterion, self)
+        dialog.item_opened.connect(self.item_opened)
+        dialog.exec()
 
     def _update_value_list(self, value_by_currency):
         """One row per currency: the code, then the amount in a large bold
@@ -844,7 +962,7 @@ class DashboardPage(QWidget):
             line.addWidget(_color_swatch(color))
 
             # RTL-aware: the label keeps its text and Qt mirrors the row.
-            name = QLabel(status)
+            name = QLabel(tr_text(status))
             name.setObjectName("breadcrumb")
             name.setMinimumWidth(120)
             line.addWidget(name)

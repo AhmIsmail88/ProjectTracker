@@ -7,6 +7,8 @@ Data comes straight from the audit log, which already records one entry per
 changed field (old value / new value / timestamp).
 """
 
+from i18n import tr_text
+
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
@@ -81,7 +83,7 @@ class CostChangeLogDialog(QDialog):
 
         self.table = EmptyStateTable(tr("cost_empty"))
         self.table.setColumnCount(len(COLUMNS))
-        self.table.setHorizontalHeaderLabels(COLUMNS)
+        self.table.setHorizontalHeaderLabels([tr_text(label) for label in COLUMNS])
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setAlternatingRowColors(True)
